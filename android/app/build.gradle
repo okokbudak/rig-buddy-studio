@@ -1,0 +1,82 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Release signing: android/keystore.properties (git-ignored; storeFile,
+// storePassword, keyAlias, keyPassword) or the RIGBUDDY_KEYSTORE* environment
+// variables (CI). Without either, release builds use the debug key (local tests).
+def signing = new Properties()
+def signingFile = rootProject.file('keystore.properties')
+if (signingFile.exists()) signingFile.withInputStream { signing.load(it) }
+def sign = { key, env -> signing.getProperty(key) ?: System.getenv(env) }
+def releaseStore = sign('storeFile', 'RIGBUDDY_KEYSTORE')
+
+// version: gradle -PappVersion=1.2.3 (the release tag); versionCode 10203
+def appVersion = (project.findProperty('appVersion') ?: '0.1.0').toString()
+def appVersionCode = appVersion.tokenize('.').collect { it.replaceAll('\\D.*', '') as int }
+        .with { (it[0] * 10000) + (it[1] * 100) + it[2] }
+
+android {
+    namespace 'tr.rigbuddy'
+    compileSdk 34
+
+    sourceSets {
+        // the button box's icons and function catalogue (art/buttonbox) are the app's assets: icons.json, actions.json
+        main.assets.srcDirs += ['../../art/buttonbox']
+    }
+
+    defaultConfig {
+        applicationId 'tr.rigbuddy'
+        // Phones, tablets and head units: Android 5.0+ (old head units run 8.1).
+        minSdk 21
+        targetSdk 34
+        versionCode appVersionCode
+        versionName appVersion
+        ndk {
+            // 32-bit ARM (older head units), 64-bit ARM (phones, tablets),
+            // x86_64 (emulators, Chromebooks)
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    signingConfigs {
+        if (releaseStore) {
+            release {
+                storeFile rootProject.file(releaseStore) // relative: next to keystore.properties
+                storePassword sign('storePassword', 'RIGBUDDY_KEYSTORE_PASSWORD')
+                keyAlias sign('keyAlias', 'RIGBUDDY_KEY_ALIAS')
+                keyPassword sign('keyPassword', 'RIGBUDDY_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig releaseStore ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // 10.x is the last MapLibre line with an OpenGL ES 2.0 renderer (11+ needs ES 3.0).
+    implementation 'org.maplibre.gl:android-sdk:10.3.7'
+    // Same version MapLibre already pulls in at runtime; used for the WebSocket client.
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

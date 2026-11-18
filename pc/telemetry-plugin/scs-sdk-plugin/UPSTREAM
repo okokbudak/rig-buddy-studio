@@ -1,0 +1,3 @@
+truckermudgeon/scs-sdk-plugin v1.12.1 (MIT), https://github.com/truckermudgeon/scs-sdk-plugin
+Commit: c8910d6e9a5ca0c2fa018942054263292cab19a4
+Changes for Rig Buddy: scs-telemetry/src/scs_telemetry.cpp calls rigbuddy_bus (scs-telemetry/inc/rigbuddy_bus.hpp, src/rigbuddy_bus.cpp), which writes the bus DLC job for the PC agent.

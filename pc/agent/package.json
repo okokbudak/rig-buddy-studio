@@ -1,0 +1,11 @@
+{
+  "name": "rigbuddy-agent",
+  "private": true,
+  "type": "module",
+  "description": "Serves full telemetry, save-game data (jobs, profile) and key input to the Rig Buddy head-unit app",
+  "main": "index.mjs",
+  "dependencies": {
+    "trucksim-telemetry": "0.22.1",
+    "ws": "^8.18.0"
+  }
+}

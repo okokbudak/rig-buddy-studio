@@ -1,0 +1,295 @@
+package tr.rigbuddy.ui;
+
+import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.SeekBar;
+import android.widget.TextView;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import tr.rigbuddy.R;
+import tr.rigbuddy.agent.AgentClient;
+
+/**
+ * Radio and music in one screen: the in-game radio while it is on (it wins when both play), otherwise the PC's music
+ * player. The PC's music player: what plays (Spotify, YouTube in a browser, Apple Music, VLC, ... anything Windows shows as a
+ * media session) with previous / play-pause / next / shuffle / repeat. The PC agent (pc/agent/media.mjs) talks to
+ * Windows; while this screen is open the state is asked for once a second.
+ */
+public final class MusicScreen {
+  private static final long POLL_MS = 1000;
+
+  /** Every answer about the PC player (null: none or the PC is unreachable), for the home screen's card. */
+  public interface MediaListener {
+    void onMedia(JSONObject media);
+  }
+
+  private final Context c;
+  private final AgentClient agent;
+  private final Handler handler = new Handler(Looper.getMainLooper());
+  private final android.widget.FrameLayout root;
+  private final LinearLayout musicView;
+  private final RadioScreen radio;
+  private final MediaListener listener;
+  private JSONObject lastRadio;
+  private final TextView app, title, artist, elapsed, total, status;
+  private final ProgressBar progress;
+  private final ImageView shuffle, prev, play, next, repeat;
+  private final ImageView muteButton;
+  private final SeekBar volumeBar;
+  private final TextView volumeText, volumeLabel;
+  private boolean dragging; // the volume slider is under the finger: a poll must not move it
+  private boolean active; // the screen is showing
+  private boolean busy;   // a command is on its way: do not let a poll answer paint over it
+
+  public MusicScreen(Context c, AgentClient agent, MediaListener listener) {
+    this.c = c;
+    this.agent = agent;
+    this.listener = listener;
+    root = new android.widget.FrameLayout(c);
+    musicView = Ui.column(c);
+    int pad = Ui.dp(c, 18);
+    musicView.setPadding(pad, pad, pad, pad);
+    radio = new RadioScreen(c);
+    android.widget.FrameLayout.LayoutParams fill = new android.widget.FrameLayout.LayoutParams(
+        android.widget.FrameLayout.LayoutParams.MATCH_PARENT, android.widget.FrameLayout.LayoutParams.MATCH_PARENT);
+    root.addView(musicView, fill);
+    root.addView(radio.view(), new android.widget.FrameLayout.LayoutParams(fill));
+
+    LinearLayout card = Ui.card(c, false);
+    LinearLayout head = Ui.row(c);
+    head.setGravity(Gravity.CENTER_VERTICAL);
+    ImageView icon = new ImageView(c);
+    icon.setImageResource(R.drawable.ic_music);
+    icon.setColorFilter(Ui.ACCENT);
+    head.addView(icon, new LinearLayout.LayoutParams(Ui.dp(c, 26), Ui.dp(c, 26)));
+    head.addView(Ui.text(c, Ui.s(R.string.music_title), 15, Ui.TEXT2, true), Ui.margins(Ui.wrap(), c, 8, 0, 0, 0));
+    app = Ui.text(c, 15, Ui.TEXT2, false);
+    head.addView(Ui.spacer(c), new LinearLayout.LayoutParams(0, 1, 1f));
+    head.addView(app);
+    card.addView(head);
+
+    title = Ui.text(c, 38, Ui.TEXT, true);
+    title.setMaxLines(3);
+    artist = Ui.text(c, 24, Ui.TEXT2, false);
+    artist.setMaxLines(2);
+    card.addView(title, Ui.margins(Ui.matchWrap(), c, 0, 26, 0, 0));
+    card.addView(artist, Ui.margins(Ui.matchWrap(), c, 0, 8, 0, 0));
+    card.addView(Ui.spacer(c), Ui.hweight(1));
+
+    progress = Ui.bar(c, Ui.ACCENT);
+    card.addView(progress, Ui.margins(Ui.matchWrap(), c, 0, 0, 0, 6));
+    LinearLayout times = Ui.row(c);
+    elapsed = Ui.text(c, 15, Ui.TEXT2, false);
+    total = Ui.text(c, 15, Ui.TEXT2, false);
+    times.addView(elapsed, new LinearLayout.LayoutParams(0, ViewGroupWrap(), 1f));
+    times.addView(total);
+    card.addView(times);
+
+    LinearLayout controls = Ui.row(c);
+    controls.setGravity(Gravity.CENTER);
+    shuffle = button(R.drawable.ic_shuffle, 56, "shuffle");
+    prev = button(R.drawable.ic_prev, 72, "previous");
+    play = button(R.drawable.ic_play, 96, "playpause");
+    next = button(R.drawable.ic_next, 72, "next");
+    repeat = button(R.drawable.ic_repeat, 56, "repeat");
+    for (ImageView b : new ImageView[] {shuffle, prev, play, next, repeat}) {
+      controls.addView(b, Ui.margins(new LinearLayout.LayoutParams(Ui.dp(c, size(b)), Ui.dp(c, size(b))), c, 10, 0, 10, 0));
+    }
+    card.addView(controls, Ui.margins(Ui.matchWrap(), c, 0, 18, 0, 6));
+
+    // the volume of the player (or of the PC when the player has none of its own): mute button, slider, percent
+    LinearLayout vol = Ui.row(c);
+    vol.setGravity(Gravity.CENTER_VERTICAL);
+    muteButton = new ImageView(c);
+    muteButton.setImageResource(R.drawable.ic_sound);
+    muteButton.setScaleType(ImageView.ScaleType.CENTER);
+    muteButton.setBackground(Ui.rounded(Ui.CARD_PRESSED, Ui.dp(c, 22)));
+    muteButton.setColorFilter(Ui.TEXT);
+    muteButton.setOnClickListener(v -> command("mute", -1));
+    vol.addView(muteButton, new LinearLayout.LayoutParams(Ui.dp(c, 44), Ui.dp(c, 44)));
+    volumeBar = new SeekBar(c);
+    volumeBar.setMax(100);
+    volumeBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+      @Override public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+        volumeText.setText(progress + " %");
+      }
+
+      @Override public void onStartTrackingTouch(SeekBar s) {
+        dragging = true;
+      }
+
+      @Override public void onStopTrackingTouch(SeekBar s) {
+        dragging = false;
+        command("volume", s.getProgress());
+      }
+    });
+    vol.addView(volumeBar, new LinearLayout.LayoutParams(0, ViewGroupWrap(), 1f));
+    volumeText = Ui.text(c, 16, Ui.TEXT2, false);
+    volumeText.setMinWidth(Ui.dp(c, 52));
+    volumeText.setGravity(Gravity.END);
+    vol.addView(volumeText);
+    card.addView(vol, Ui.margins(Ui.matchWrap(), c, 0, 6, 0, 0));
+    volumeLabel = Ui.text(c, 13, Ui.TEXT2, false);
+    card.addView(volumeLabel, Ui.margins(Ui.matchWrap(), c, 54, 0, 0, 0));
+
+    status = Ui.text(c, 14, Ui.TEXT2, false);
+    status.setGravity(Gravity.CENTER);
+    card.addView(status, Ui.matchWrap());
+    musicView.addView(card, Ui.hweight(1));
+
+    render(null);
+    onRadio(null, false);
+  }
+
+  /** The station the game plays, or null (radio off, or the PC unreachable: agentUp tells which). */
+  public void onRadio(JSONObject r, boolean agentUp) {
+    lastRadio = r;
+    radio.onRadio(r, agentUp);
+    // the game's radio first: shown while it is on, the music player otherwise
+    radio.view().setVisibility(r != null ? View.VISIBLE : View.GONE);
+    musicView.setVisibility(r != null ? View.GONE : View.VISIBLE);
+  }
+
+  private static int ViewGroupWrap() {
+    return android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+  }
+
+  private int size(ImageView b) {
+    return (Integer) b.getTag();
+  }
+
+  private ImageView button(int drawable, int sizeDp, String action) {
+    ImageView b = new ImageView(c);
+    b.setImageResource(drawable);
+    b.setScaleType(ImageView.ScaleType.CENTER);
+    b.setTag(sizeDp); // read back by size()
+    b.setBackground(Ui.rounded(Ui.CARD_PRESSED, Ui.dp(c, sizeDp) / 2f));
+    b.setColorFilter(Ui.TEXT);
+    b.setOnClickListener(v -> command(action, -1));
+    return b;
+  }
+
+  public View view() {
+    return root;
+  }
+
+  /** The screen is shown (true) or left (false): the state is polled only while it is shown. */
+  public void setActive(boolean on) {
+    if (on == active) return;
+    active = on;
+    handler.removeCallbacksAndMessages(null);
+    if (on) poll();
+  }
+
+  private void poll() {
+    if (!active) return;
+    agent.get("/media", (json, error) -> {
+      if (!busy) render(json, error);
+      if (active) handler.postDelayed(this::poll, POLL_MS);
+    });
+  }
+
+  private void command(String action, int value) {
+    busy = true;
+    JSONObject body = new JSONObject();
+    try {
+      body.put("action", action);
+      if (value >= 0) body.put("value", value);
+    } catch (JSONException e) {
+      throw new IllegalStateException(e);
+    }
+    agent.post("/media", body, (json, error) -> {
+      busy = false;
+      render(json, error);
+    });
+  }
+
+  private void render(JSONObject s, String error) {
+    if (listener != null) listener.onMedia(s);
+    if (s == null) {
+      render(null);
+      status.setText(error != null ? error : "");
+      return;
+    }
+    render(s);
+  }
+
+  private void render(JSONObject s) {
+    boolean on = s != null && s.optBoolean("active");
+    status.setText("");
+    if (!on) {
+      app.setText("");
+      title.setText(Ui.s(R.string.music_nothing));
+      title.setTextSize(26);
+      artist.setText(Ui.s(R.string.music_nothing_hint));
+      progress.setProgress(0);
+      elapsed.setText("");
+      total.setText("");
+      enable(shuffle, false);
+      enable(prev, false);
+      enable(play, false);
+      enable(next, false);
+      enable(repeat, false);
+      play.setImageResource(R.drawable.ic_play);
+      enable(volumeBar, false);
+      enable(muteButton, false);
+      volumeText.setText("");
+      volumeLabel.setText("");
+      return;
+    }
+    title.setTextSize(38);
+    app.setText(s.optString("app"));
+    String t = s.optString("title");
+    title.setText(t.isEmpty() ? Ui.s(R.string.music_unknown) : t);
+    String a = s.optString("artist"), al = s.optString("album");
+    artist.setText(a.isEmpty() ? al : al.isEmpty() ? a : a + "  ·  " + al);
+    double pos = s.optDouble("position"), dur = s.optDouble("duration");
+    progress.setMax(1000);
+    progress.setProgress(dur > 0 ? (int) Math.min(1000, pos / dur * 1000) : 0);
+    elapsed.setText(dur > 0 ? time(pos) : "");
+    total.setText(dur > 0 ? time(dur) : "");
+
+    boolean playing = "playing".equals(s.optString("status"));
+    play.setImageResource(playing ? R.drawable.ic_pause : R.drawable.ic_play);
+    enable(play, playing ? s.optBoolean("canPause", true) : s.optBoolean("canPlay", true));
+    enable(prev, s.optBoolean("canPrevious", true));
+    enable(next, s.optBoolean("canNext", true));
+    enable(shuffle, s.optBoolean("canShuffle"));
+    enable(repeat, s.optBoolean("canRepeat"));
+    boolean shuffleOn = s.optBoolean("shuffle");
+    shuffle.setColorFilter(shuffleOn ? Ui.ACCENT : Ui.TEXT);
+    String rep = s.optString("repeat", "none");
+    repeat.setImageResource("track".equals(rep) ? R.drawable.ic_repeat_one : R.drawable.ic_repeat);
+    repeat.setColorFilter("none".equals(rep) ? Ui.TEXT : Ui.ACCENT);
+
+    int volume = s.optInt("volume", -1);
+    boolean muted = s.optBoolean("muted");
+    enable(volumeBar, volume >= 0);
+    enable(muteButton, volume >= 0);
+    if (volume >= 0 && !dragging) {
+      volumeBar.setProgress(volume);
+      volumeText.setText(volume + " %");
+    }
+    muteButton.setImageResource(muted ? R.drawable.ic_volume_off : R.drawable.ic_sound);
+    muteButton.setColorFilter(muted ? Ui.RED : Ui.TEXT);
+    volumeLabel.setText(volume < 0 ? "" : Ui.s("app".equals(s.optString("volumeScope")) ? R.string.music_volume_app : R.string.music_volume_system));
+  }
+
+  private static void enable(View b, boolean on) {
+    b.setEnabled(on);
+    b.setAlpha(on ? 1f : 0.35f);
+  }
+
+  private static String time(double seconds) {
+    long s = Math.max(0, Math.round(seconds));
+    return String.format(java.util.Locale.US, "%d:%02d", s / 60, s % 60);
+  }
+}

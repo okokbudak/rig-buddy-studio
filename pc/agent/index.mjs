@@ -1,0 +1,564 @@
+// Rig Buddy agent: runs on the gaming PC next to the navigation server and
+// serves the head-unit app everything the navigation server doesn't:
+//   ws://PC:62843/ws      -> {"type":"telemetry","data":{...}} at 5 Hz, {"type":"save",...} on new autosave,
+//                            {"type":"radio","data":{name,genre,country,song}|null} when the in-game radio changes
+//   GET  /profile         -> profile/economy summary from the latest save
+//   GET  /jobs            -> freight-market offers, nearest pickup first
+//   GET  /update          -> {latest, url, name, current, newer}: the newest Rig Buddy release on GitHub (cached, asked from the PC)
+//   GET  /media           -> the PC's music player: {active, app, title, artist, album, status, position, duration, shuffle, repeat, can*}
+//   POST /media {action[, value]} -> playpause | play | pause | next | previous | shuffle | repeat | mute | volume (value 0-100);
+//                                    answers with the new state (volume, muted, volumeScope: the player's own or the PC's)
+//   GET  /sound           -> {games: [{id, name, mods: [{name, active, guids}]}]}: the sound plugin's mods per game
+//   POST /sound {game, mod, active} -> switches a sound mod on or off (the plugin loads it within a second)
+//   POST /sound {game, level|layer, value} -> a volume of sound_levels.txt, or a layer of the mod (layer_levels.json)
+//   GET  /update?force=1 -> the same, asking GitHub right now (the "Check now" button)
+//   GET  /get-app         -> RigBuddy.apk of this install, no pairing needed (a phone downloads the app from its PC)
+//   GET  /update/apk      -> the latest release's RigBuddy.apk (this PC fetches it from GitHub and checks its SHA-256)
+//   GET  /tiles           -> {"ets2": {size, version}}: map files the app can download
+//   GET  /tiles/ets2.mbtiles -> the map file itself
+//   GET  /tiles/sprites.json|png -> the map's POI icons ("sprites" in /tiles)
+//   ws {"type":"front"} -> {"type":"front","front":true|false|null}: is the game's window in front (the button box dims its buttons when not)
+//   POST /screen {dir}   -> this PC only: every app goes one screen on ("next") or back ("prev"): the wheel buttons
+//   GET  /controls        -> {game, bindings: {function: key}}: the keyboard keys the active profile has for the game's functions
+//   ws {"type":"button",id,key|action,down} -> the button box: presses that key ("h", "lshift+d") or the key the game has for that function (controls.sii), see controls.mjs
+//   GET  /catalog         -> this PC only: [{path, kind, info?}], every telemetry value by name (the window's game data page)
+//   ws {"type":"watch","paths":[...]} -> this PC only: {"type":"live","status":{game},"values":{path: value}} at 5 Hz, the
+//                            window's live telemetry and inspector (names as in /catalog, see props.mjs)
+//   GET  /pair            -> {required, paired}: does this device have to pair?
+//   POST /pair {code, name} -> {token}: trade the 6-digit code shown on the PC for the device's token (see pair.mjs)
+//   GET  /pair/code, GET /pair/devices, POST /pair/revoke -> this PC only (tray app)
+// Everything except /pair needs the token (Authorization: Bearer, or ?token=) unless it comes from this PC itself.
+// Clients are the app and RigBuddy.exe, never a browser: see fromWebPage().
+import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import tst from 'trucksim-telemetry';
+import { WebSocketServer } from 'ws';
+import { createRadio } from './radio.mjs';
+import { busJobFrom, readBusFile } from './busjob.mjs';
+import { defs, findLatestSave, loadSave } from './save.mjs';
+import { bindingsFor, gameInFront, pressAction, pressKey } from './controls.mjs';
+import { mediaCommand, mediaState } from './media.mjs';
+import { setSoundLayer, setSoundLevel, setSoundMod, soundState } from './sound.mjs';
+import { apkFile, updateInfo } from './update.mjs';
+import { createPairing, isLocal, tokenOf } from './pair.mjs';
+import { catalog, read } from './props.mjs';
+
+const PORT = Number(process.env.AGENT_PORT || 62843);
+const TELEMETRY_HZ = 5;
+const SAVE_POLL_MS = 5000;
+
+let latest = null;       // last telemetry summary
+let lastRaw = null;      // the full telemetry behind it (props.mjs reads names from it), null while no game runs
+let rawTruckPos = null;  // { x, z } game meters
+let game = 'ets2';
+let save = null;         // loadSave() result
+let saveError = null;
+
+// --- telemetry ------------------------------------------------------------------
+
+function summarize(t) {
+  const tr = t.truck, eng = tr.engine, fuel = tr.fuel;
+  const trailer = t.trailer ?? {};
+  return {
+    game: t.game.game.name,
+    paused: t.game.paused,
+    gameTime: t.game.time.value, // minutes since day 0
+    scale: t.game.scale,
+    // the truck's place at 5 Hz (the navigation server only pushes ~2 Hz): game metres as in its positionUpdate
+    // (x = game X, z = game Z), heading in turns, speed in m/s; t = this PC's clock when it was read
+    position: {
+      x: tr.position.X,
+      z: tr.position.Z,
+      heading: tr.orientation.heading,
+      speedMs: tr.speed.value,
+      t: Date.now(),
+    },
+    truck: {
+      brand: tr.brand?.name ?? tr.make?.name ?? '',
+      model: tr.model?.name ?? '',
+      plate: tr.licensePlate?.value ?? '',
+      speedKph: tr.speed.kph,
+      cruise: { enabled: tr.cruiseControl.enabled, kph: tr.cruiseControl.kph },
+      rpm: eng.rpm.value,
+      rpmMax: eng.rpm.max,
+      gear: tr.transmission.gear.displayed,
+      forwardGears: tr.transmission.forwardGears,
+      engineOn: eng.enabled,
+      electricOn: tr.electric.enabled,
+      fuel: { liters: fuel.value, capacity: fuel.capacity, avgLPer100: fuel.avgConsumption * 100, rangeKm: fuel.range, warning: fuel.warning.enabled },
+      adBlue: { liters: tr.adBlue.value, capacity: tr.adBlue.capacity, warning: tr.adBlue.warning.enabled },
+      oilPressure: { value: eng.oilPressure.value, warning: eng.oilPressure.warning.enabled },
+      oilTemp: eng.oilTemperature.value,
+      waterTemp: { value: eng.waterTemperature.value, warning: eng.waterTemperature.warning.enabled },
+      battery: { volts: eng.batteryVoltage.value, warning: eng.batteryVoltage.warning.enabled },
+      airPressure: { value: tr.brakes.airPressure.value, warning: tr.brakes.airPressure.warning.enabled, emergency: tr.brakes.airPressure.emergency.enabled },
+      brakeTemp: tr.brakes.temperature.value,
+      parkingBrake: tr.brakes.parking.enabled,
+      motorBrake: tr.brakes.motor.enabled,
+      retarder: { level: tr.brakes.retarder.level, steps: tr.brakes.retarder.steps },
+      diffLock: tr.differential.lock?.enabled ?? false,
+      odometerKm: tr.odometer,
+      wipers: tr.wipers.enabled,
+      lights: {
+        low: tr.lights.beamLow.enabled,
+        high: tr.lights.beamHigh.enabled,
+        parking: tr.lights.parking.enabled,
+        beacon: tr.lights.beacon.enabled,
+        hazard: tr.lights.hazard?.enabled ?? false,
+        blinkerLeft: tr.lights.blinker.left.active,
+        blinkerRight: tr.lights.blinker.right.active,
+        auxFront: tr.lights.auxFront.value,
+        auxRoof: tr.lights.auxRoof.value,
+      },
+      damage: pct(tr.damage),
+    },
+    trailer: {
+      attached: !!trailer.attached,
+      name: trailer.model?.name ?? '',
+      damage: trailer.damage ? pct(trailer.damage) : null,
+    },
+    job: t.job?.destination?.city?.id
+      ? {
+          cargo: t.job.cargo.name,
+          massT: Math.round(t.job.cargo.mass / 100) / 10,
+          cargoDamage: Math.round(t.job.cargo.damage * 1000) / 10,
+          loaded: t.job.cargo.isLoaded,
+          income: t.job.income,
+          source: `${t.job.source.company.name}, ${t.job.source.city.name}`,
+          destination: `${t.job.destination.company.name}, ${t.job.destination.city.name}`,
+          plannedKm: t.job.plannedDistance.km,
+          deliveryTime: t.job.expectedDeliveryTimestamp.value, // game minutes
+          market: t.job.market?.name ?? '',
+          special: t.job.isSpecial,
+        }
+      : null,
+    navigation: {
+      distanceKm: t.navigation.distance / 1000,
+      timeMin: t.navigation.time / 60,
+      speedLimitKph: t.navigation.speedLimit.kph,
+      nextRestStopMin: t.navigation.nextRestStop,
+    },
+  };
+}
+
+/**
+ * The bus line being driven (pc/telemetry-plugin via busjob.mjs), or null. The map data for the stops' road nodes
+ * is loaded once per game; without it (no map built yet) the stops come without nodes.
+ */
+function busJobNow(g) {
+  const file = readBusFile(g);
+  if (!file?.active) return null;
+  let d = null;
+  if (Date.now() - (defsFailedAt[g] ?? 0) > 60_000) {
+    try {
+      d = defs(g);
+    } catch {
+      defsFailedAt[g] = Date.now(); // no map data: try again in a minute, not at 5 Hz
+    }
+  }
+  return busJobFrom(file, d);
+}
+const defsFailedAt = {};
+
+const pct = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, Math.round((v ?? 0) * 1000) / 10]));
+
+function pollTelemetry() {
+  let t = null;
+  try {
+    t = tst.getData();
+  } catch {
+    t = null;
+  }
+  if (!t || (t.truck.position.X === 0 && t.truck.position.Z === 0)) {
+    if (latest !== null) broadcast({ type: 'telemetry', data: null });
+    latest = null;
+    lastRaw = null;
+    return;
+  }
+  lastRaw = t;
+  try {
+    latest = summarize(t);
+    rawTruckPos = { x: t.truck.position.X, z: t.truck.position.Z };
+    const g = latest.game === 'ats' ? 'ats' : 'ets2';
+    if (g !== game) {
+      game = g;
+      save = null;
+      lastSaveMtime = 0;
+      radio.setGame(g);
+    }
+    latest.busJob = busJobNow(g);
+    broadcast({ type: 'telemetry', data: latest });
+  } catch (e) {
+    console.warn('telemetry summarize failed:', e.message);
+  }
+}
+
+// --- saves -------------------------------------------------------------------------
+
+let lastSaveMtime = 0;
+function pollSave() {
+  try {
+    const found = findLatestSave(game);
+    if (!found || found.mtimeMs === lastSaveMtime) return;
+    lastSaveMtime = found.mtimeMs;
+    const t0 = Date.now();
+    save = loadSave(game);
+    saveError = null;
+    console.log(`save loaded (${Date.now() - t0} ms): ${save.jobs.length} offers, money ${save.profile.money} — ${found.file}`);
+    broadcast({ type: 'save', data: { savedAt: save.savedAt, jobs: save.jobs.length } });
+  } catch (e) {
+    saveError = e.message;
+    console.warn('save load failed:', e.message);
+  }
+}
+
+/** kind: 'freight', 'bus' or anything else for both. */
+function jobsForApp(limit, kind) {
+  if (!save) return [];
+  const scale = game === 'ats' ? 20 : 19;
+  return save.jobs
+    .filter(j => (kind === 'freight' || kind === 'bus' ? j.kind === kind : true))
+    .map(j => ({
+      ...j,
+      pickupKm: rawTruckPos && j.source.x != null
+        ? Math.round((Math.hypot(j.source.x - rawTruckPos.x, j.source.y - rawTruckPos.z) * scale) / 1000)
+        : null,
+    }))
+    .sort((a, b) => (a.pickupKm ?? 1e9) - (b.pickupKm ?? 1e9))
+    .slice(0, limit)
+    .map(({ source: { x, y, ...src }, ...rest }) => ({ ...rest, source: src }));
+}
+
+// --- in-game radio ---------------------------------------------------------------------------
+
+// dev/demo/run-demo.ps1 (screenshots): a made-up station instead of what the game is playing
+const DEMO_RADIO = process.env.RIGBUDDY_DEMO_RADIO ? JSON.parse(fs.readFileSync(process.env.RIGBUDDY_DEMO_RADIO, 'utf8')) : null;
+const radioPayload = () => DEMO_RADIO ?? radio.state();
+const radio = createRadio(() => broadcast({ type: 'radio', data: radioPayload() }));
+
+const MAX_BODY = 16 * 1024; // the app sends nothing over the WebSocket; keep what a client may send small
+
+// --- map tiles for the app -----------------------------------------------------------------
+// Phones and tablets can't `adb push` the map: the app downloads data/<game>.mbtiles
+// from here on first connect and again whenever `version` (size + mtime) changes.
+
+const DATA_DIR = process.env.RIGBUDDY_DATA || path.resolve(import.meta.dirname, '../../data');
+const pairing = createPairing(DATA_DIR);
+// AGENT_NO_AUTH=1 (development only): let every device in without a token
+const NO_AUTH = process.env.AGENT_NO_AUTH === '1';
+
+function tileFile(g) {
+  const file = path.join(DATA_DIR, `${g}.mbtiles`);
+  try {
+    const st = fs.statSync(file);
+    return { file, size: st.size, version: `${st.size}-${Math.floor(st.mtimeMs)}` };
+  } catch {
+    return null;
+  }
+}
+
+// the map's POI icons (data/sprites/app.*, cut from the game's own icons by the pipeline)
+const SPRITES = { json: 'application/json', png: 'image/png' };
+function spriteFiles() {
+  try {
+    const st = Object.keys(SPRITES).map(ext => fs.statSync(path.join(DATA_DIR, 'sprites', `app.${ext}`)));
+    const size = st.reduce((s, x) => s + x.size, 0);
+    return { size, version: `${size}-${Math.floor(Math.max(...st.map(x => x.mtimeMs)))}` };
+  } catch {
+    return null;
+  }
+}
+
+function tilesIndex() {
+  const out = {};
+  for (const g of ['ets2', 'ats']) {
+    const t = tileFile(g);
+    if (t) out[g] = { size: t.size, version: t.version };
+  }
+  const s = spriteFiles();
+  if (s) out.sprites = s;
+  return out;
+}
+
+function sendTiles(req, res, g) {
+  const t = tileFile(g);
+  if (!t) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: `no ${g}.mbtiles` }));
+  }
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': t.size,
+    ETag: `"${t.version}"`,
+  });
+  if (req.method === 'HEAD') return res.end();
+  fs.createReadStream(t.file).pipe(res);
+}
+
+// --- HTTP + WebSocket --------------------------------------------------------------------
+
+/**
+ * True for requests made by a web page. Browsers send Origin with cross-site
+ * fetches, every POST and every WebSocket; without this check (and with CORS
+ * open) any site open on this PC or on the LAN could read
+ * the profile, the telemetry and the radio. The Host check
+ * stops DNS rebinding: a page whose own domain resolves to this PC is
+ * same-origin, but its Host header carries that domain, not an address.
+ */
+function fromWebPage(req) {
+  if (req.headers.origin != null) return true;
+  const host = String(req.headers.host ?? '').replace(/:\d+$/, '').replace(/^\[(.*)\]$/, '$1').toLowerCase();
+  const me = os.hostname().toLowerCase();
+  return !(net.isIP(host) || host === 'localhost' || host === me || host.startsWith(`${me}.`));
+}
+
+/** A paired device's token, or a request from this PC itself. */
+function authorized(req, url) {
+  return NO_AUTH || isLocal(req) || pairing.isValid(tokenOf(req, url));
+}
+
+/**
+ * POST /pair {code, name} -> {token}: the app trades the code shown on the PC for its token (no token needed, but wrong
+ * codes are limited). Only this PC: GET /pair/code -> {code, expiresAt} for the tray, GET /pair/devices, POST /pair/revoke.
+ * GET /pair -> {required: true} lets an app ask whether it has to pair at all.
+ */
+function handlePair(req, url, send) {
+  if (url.pathname === '/pair' && req.method === 'GET') return send(200, { required: !NO_AUTH, paired: authorized(req, url) });
+  if (url.pathname === '/pair' && req.method === 'POST') {
+    let size = 0;
+    const chunks = [];
+    req.on('data', c => { size += c.length; if (size > 1024) req.destroy(); else chunks.push(c); });
+    req.on('end', () => {
+      let b;
+      try {
+        b = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        return send(400, { error: 'bad request' });
+      }
+      const r = pairing.pair(b?.code, b?.name);
+      if (r.token) return send(200, { token: r.token });
+      if (r.error === 'locked') return send(429, { error: 'locked', retryAfter: Math.ceil(r.retryAfterMs / 1000) });
+      if (r.error === 'full') return send(409, { error: 'full' });
+      return send(403, { error: 'code' });
+    });
+    return;
+  }
+  if (!isLocal(req)) return send(403, { error: 'this PC only' });
+  if (url.pathname === '/pair/code' && req.method === 'GET') return send(200, pairing.currentCode());
+  if (url.pathname === '/pair/devices' && req.method === 'GET') return send(200, { devices: pairing.list() });
+  if (url.pathname === '/pair/revoke' && req.method === 'POST') {
+    pairing.revokeAll();
+    return send(200, { devices: [] });
+  }
+  return send(404, { error: 'not found' });
+}
+
+const server = http.createServer((req, res) => {
+  if (fromWebPage(req)) {
+    res.writeHead(403);
+    return res.end();
+  }
+  const url = new URL(req.url, 'http://x');
+  const send = (code, body) => {
+    res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(body));
+  };
+  if (url.pathname === '/pair' || url.pathname.startsWith('/pair/')) return handlePair(req, url, send);
+  // the app itself, for a phone that has none yet (so before pairing): open http://<this PC>:62843/get-app in its browser
+  if (url.pathname === '/get-app') {
+    const apk = process.env.RIGBUDDY_APK;
+    if (req.method !== 'GET' || !apk || !fs.existsSync(apk)) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('no app here'); }
+    res.writeHead(200, {
+      'Content-Type': 'application/vnd.android.package-archive',
+      'Content-Length': fs.statSync(apk).size,
+      'Content-Disposition': 'attachment; filename="RigBuddy.apk"',
+    });
+    return fs.createReadStream(apk).pipe(res);
+  }
+  // everything else is for paired devices (or this PC itself)
+  if (!authorized(req, url)) return send(401, { error: 'unauthorized' });
+  if (url.pathname === '/update') {
+    // is there a newer Rig Buddy on GitHub: {latest, url, name, current, newer} (asked at most every 6 hours)
+    if (req.method !== 'GET') return send(405, { error: 'method' });
+    updateInfo({ force: url.searchParams.get('force') === '1' }).then(i => send(200, i), () => send(200, { latest: null, newer: false }));
+    return;
+  }
+  if (url.pathname === '/update/apk') {
+    // the latest release's APK, fetched from GitHub by this PC and checked against GitHub's SHA-256 (the app checks again)
+    if (req.method !== 'GET') return send(405, { error: 'method' });
+    apkFile(DATA_DIR).then(a => {
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.android.package-archive',
+        'Content-Length': fs.statSync(a.file).size,
+        'X-RigBuddy-Version': a.version,
+        'X-RigBuddy-Sha256': a.sha256,
+      });
+      fs.createReadStream(a.file).pipe(res);
+    }, e => send(502, { error: e.message }));
+    return;
+  }
+  if (url.pathname === '/media') {
+    // the PC's music player: GET what plays, POST {action: playpause|play|pause|next|previous|shuffle|repeat}
+    if (req.method === 'GET') {
+      mediaState().then(s => send(200, s), () => send(200, { active: false }));
+      return;
+    }
+    if (req.method === 'POST') {
+      let size = 0;
+      const chunks = [];
+      req.on('data', c => { size += c.length; if (size > 1024) req.destroy(); else chunks.push(c); });
+      req.on('end', () => {
+        let action, value;
+        try {
+          const b = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          action = String(b.action);
+          value = b.value === undefined ? undefined : Number(b.value);
+        } catch {
+          return send(400, { error: 'bad request' });
+        }
+        mediaCommand(action, value).then(s => (s ? send(200, s) : send(404, { error: 'unknown action' })), () => send(502, { error: 'player' }));
+      });
+      return;
+    }
+    return send(405, { error: 'method' });
+  }
+  if (url.pathname === '/screen') {
+    // the wheel buttons (RigBuddy.exe): every app goes one screen on or back; only this PC may ask
+    if (req.method !== 'POST' || !isLocal(req)) return send(403, { error: 'local only' });
+    let body = '';
+    req.on('data', d => { body += d; if (body.length > 1000) req.destroy(); });
+    req.on('end', () => {
+      let dir = 'next';
+      try { dir = JSON.parse(body).dir === 'prev' ? 'prev' : 'next'; } catch { /* default */ }
+      broadcast({ type: 'screen', dir });
+      send(200, { ok: true, clients: wss.clients.size });
+    });
+    return;
+  }
+  if (url.pathname === '/controls') {
+    // the keys the game has for its functions on the keyboard ({function: key}): the button box suggests them for its buttons
+    if (req.method !== 'GET') return send(405, { error: 'method' });
+    try {
+      return send(200, { game, bindings: bindingsFor(game) });
+    } catch (e) {
+      return send(200, { game, bindings: {}, error: String(e.message || e) });
+    }
+  }
+  if (url.pathname === '/sound') {
+    // the sound mods of the sound plugin: GET the list per game, POST {game, mod, active} switches one on or off
+    if (req.method === 'GET') return send(200, soundState());
+    if (req.method === 'POST') {
+      let size = 0;
+      const chunks = [];
+      req.on('data', c => { size += c.length; if (size > 4096) req.destroy(); else chunks.push(c); });
+      req.on('end', () => {
+        try {
+          const b = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          const state = b.level !== undefined
+            ? setSoundLevel(String(b.game), String(b.level), Number(b.value)) // a volume: {game, level, value}
+            : b.layer !== undefined
+              ? setSoundLayer(String(b.game), String(b.layer), Number(b.value)) // a layer of the mod: {game, layer, value}
+              : setSoundMod(String(b.game), String(b.mod), !!b.active);        // a mod on or off: {game, mod, active}
+          return state ? send(200, state) : send(404, { error: 'no such game or sound mod' });
+        } catch {
+          return send(400, { error: 'bad request' });
+        }
+      });
+      return;
+    }
+    return send(405, { error: 'method' });
+  }
+  if (url.pathname === '/health') {
+    // clients: connected apps (head units / phones), shown in the PC app's window
+    return send(200, { ok: true, telemetry: latest !== null, save: !!save, clients: wss.clients.size });
+  }
+  if (url.pathname === '/catalog') {
+    if (!isLocal(req)) return send(403, { error: 'this PC only' });
+    return send(200, catalog());
+  }
+  if (url.pathname === '/profile') {
+    if (!save) return send(503, { error: saveError || 'nosave' });
+    return send(200, { ...save.profile, currency: save.currency, gameTime: save.gameTime, savedAt: save.savedAt });
+  }
+  if (url.pathname === '/jobs') {
+    if (!save) return send(503, { error: saveError || 'nosave' });
+    const limit = Math.min(500, Number(url.searchParams.get('limit') || 200));
+    // ?kind=freight | bus (bus lines of the bus DLC); without it both, nearest first
+    const kind = url.searchParams.get('kind') || 'all';
+    const counts = { freight: save.jobs.filter(j => j.kind === 'freight').length, bus: save.jobs.filter(j => j.kind === 'bus').length };
+    return send(200, { savedAt: save.savedAt, gameTime: save.gameTime, currency: save.currency, counts, jobs: jobsForApp(limit, kind) });
+  }
+  if (url.pathname === '/tiles') return send(200, tilesIndex());
+  const tile = /^\/tiles\/(ets2|ats)\.mbtiles$/.exec(url.pathname);
+  if (tile) return sendTiles(req, res, tile[1]);
+  const sprite = /^\/tiles\/sprites\.(json|png)$/.exec(url.pathname);
+  if (sprite) {
+    const file = path.join(DATA_DIR, 'sprites', `app.${sprite[1]}`);
+    if (!fs.existsSync(file)) return send(404, { error: 'no sprites' });
+    res.writeHead(200, { 'Content-Type': SPRITES[sprite[1]], 'Content-Length': fs.statSync(file).size });
+    return fs.createReadStream(file).pipe(res);
+  }
+  send(404, { error: 'not found' });
+});
+
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_BODY, verifyClient: ({ req }) => !fromWebPage(req) && authorized(req, new URL(req.url, 'http://x')) });
+wss.on('connection', (ws, req) => {
+  if (latest) ws.send(JSON.stringify({ type: 'telemetry', data: latest }));
+  // The PC app's window: {"type":"watch","paths":[...]} -> the values of those names at 5 Hz (this PC only)
+  let watch = null, liveTimer = null;
+  const pushLive = () => {
+    if (ws.readyState !== 1 || !watch) return;
+    const values = {};
+    for (const p of watch) values[p] = read(lastRaw, p) ?? null;
+    ws.send(JSON.stringify({ type: 'live', status: { game: lastRaw != null }, values }));
+  };
+  ws.send(JSON.stringify({ type: 'radio', data: radioPayload() }));
+  // The button box: {"type":"button","id":n,"action":"horn","down":true|false} presses / releases the key the game has for that
+  // function ("down" left out: one tap); answered with {"type":"button","id":n,"ok":true|false,"error"?}.
+  const held = new Map();   // what this tablet holds down (a key or a function name -> byKey): let go of it if the tablet goes away
+  ws.on('message', raw => {
+    let m;
+    try {
+      m = JSON.parse(String(raw));
+    } catch {
+      return;
+    }
+    if (m?.type === 'watch' && Array.isArray(m.paths) && isLocal(req)) {
+      watch = m.paths.filter(p => typeof p === 'string').slice(0, 400);
+      if (!liveTimer) liveTimer = setInterval(pushLive, 1000 / TELEMETRY_HZ);
+      pushLive();
+      return;
+    }
+    if (m?.type === 'front') {   // the button box asks every few seconds whether the game is in front
+      gameInFront().then(front => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'front', front })); });
+      return;
+    }
+    const byKey = typeof m?.key === 'string';
+    if (m?.type !== 'button' || (!byKey && typeof m.action !== 'string')) return;
+    const what = byKey ? m.key : m.action;
+    const down = typeof m.down === 'boolean' ? m.down : undefined;
+    if (down === true) held.set(what, byKey);
+    else if (down === false) held.delete(what);
+    (byKey ? pressKey(what, down) : pressAction(what, down, game, null)).then(r => {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'button', id: m.id, ...r }));
+    });
+  });
+  ws.on('close', () => {
+    if (liveTimer) clearInterval(liveTimer);
+    for (const [what, byKey] of held) (byKey ? pressKey(what, false) : pressAction(what, false, game, null));
+    held.clear();
+  });
+});
+function broadcast(msg) {
+  const s = JSON.stringify(msg);
+  for (const c of wss.clients) if (c.readyState === 1) c.send(s);
+}
+
+server.listen(PORT, () => console.log(`Rig Buddy agent listening on port ${PORT}`));
+
+setInterval(pollTelemetry, 1000 / TELEMETRY_HZ);
+setInterval(pollSave, SAVE_POLL_MS);
+pollSave();

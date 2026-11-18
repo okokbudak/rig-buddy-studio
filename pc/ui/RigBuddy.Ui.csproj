@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Rig Buddy Studio's window: native WPF, no browser. It knows nothing about the tray host (pc/host): it
+       talks to the Studio engine over the local API and to the host through IHostBridge. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RigBuddy.Ui</RootNamespace>
+    <AssemblyName>RigBuddy.Ui</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- QR code of the app's download address (MIT): only the module matrix is used, the picture is drawn in WPF -->
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+  </ItemGroup>
+
+</Project>

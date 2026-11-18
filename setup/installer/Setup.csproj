@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Rig Buddy Studio installer: one exe with the whole app inside (payload.zip, made by setup/build.sh).
+       Built in WSL/Linux with `dotnet publish -p:EnableWindowsTargeting=true`; nothing is extracted to the user's
+       Temp folder (no native-library self-extraction). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>RigBuddyStudio-Setup</AssemblyName>
+    <Product>Rig Buddy Studio</Product>
+    <Version>0.1.0</Version>
+    <Copyright>Copyright (C) 2026 Orhan Kökbudak. GPL-3.0-or-later.</Copyright>
+    <ApplicationIcon>..\..\pc\host\rigbuddy.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <PayloadZip Condition="'$(PayloadZip)' == ''">$(MSBuildThisFileDirectory)payload-empty.zip</PayloadZip>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="$(PayloadZip)" LogicalName="payload.zip" />
+  </ItemGroup>
+
+</Project>

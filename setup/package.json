@@ -1,0 +1,9 @@
+{
+  "name": "rigbuddy-setup-tools",
+  "private": true,
+  "type": "module",
+  "description": "Build tools for setup/build.sh (the Node bundles of the agent and Studio)",
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}

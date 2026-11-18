@@ -1,0 +1,826 @@
+[
+{
+"id": "horn",
+"icon": "horn",
+"category": "sound",
+"tr": "Korna",
+"en": "Horn",
+"mode": "hold"
+},
+{
+"id": "airhorn",
+"icon": "airhorn",
+"category": "sound",
+"tr": "Havalı korna",
+"en": "Air horn",
+"mode": "hold"
+},
+{
+"id": "lighthorn",
+"icon": "flash",
+"category": "lights",
+"tr": "Selektör",
+"en": "Flash lights",
+"mode": "hold"
+},
+{
+"id": "lighton",
+"icon": "lowbeam",
+"category": "lights",
+"tr": "Farlar aç",
+"en": "Lights on",
+"mode": "tap"
+},
+{
+"id": "lightoff",
+"icon": "lights_off",
+"category": "lights",
+"tr": "Farlar kapat",
+"en": "Lights off",
+"mode": "tap"
+},
+{
+"id": "light",
+"icon": "lowbeam",
+"category": "lights",
+"tr": "Far döngüsü",
+"en": "Light cycle",
+"mode": "tap"
+},
+{
+"id": "lightpark",
+"icon": "parking_lights",
+"category": "lights",
+"tr": "Park lambası",
+"en": "Parking lights",
+"mode": "tap"
+},
+{
+"id": "hblight",
+"icon": "highbeam",
+"category": "lights",
+"tr": "Uzun far",
+"en": "High beam",
+"mode": "tap"
+},
+{
+"id": "beacon",
+"icon": "beacon",
+"category": "lights",
+"tr": "Tepe lambası",
+"en": "Beacon",
+"mode": "tap"
+},
+{
+"id": "cabinlight",
+"icon": "cabin_light",
+"category": "lights",
+"tr": "Kabin ışığı",
+"en": "Cabin light",
+"mode": "tap"
+},
+{
+"id": "flasher4way",
+"icon": "hazard",
+"category": "signals",
+"tr": "Dörtlü flaşör",
+"en": "Hazard lights",
+"mode": "tap"
+},
+{
+"id": "lblinker",
+"icon": "blinker_left",
+"category": "signals",
+"tr": "Sol sinyal",
+"en": "Left indicator",
+"mode": "tap"
+},
+{
+"id": "rblinker",
+"icon": "blinker_right",
+"category": "signals",
+"tr": "Sağ sinyal",
+"en": "Right indicator",
+"mode": "tap"
+},
+{
+"id": "wipers",
+"icon": "wipers",
+"category": "wipers",
+"tr": "Silecek",
+"en": "Wipers",
+"mode": "tap"
+},
+{
+"id": "wipersback",
+"icon": "wipers",
+"category": "wipers",
+"tr": "Silecek geri",
+"en": "Wipers back",
+"mode": "tap"
+},
+{
+"id": "wipers0",
+"icon": "wipers_off",
+"category": "wipers",
+"tr": "Silecek kapalı",
+"en": "Wipers off",
+"mode": "tap"
+},
+{
+"id": "wipers1",
+"icon": "wipers",
+"category": "wipers",
+"tr": "Silecek 1",
+"en": "Wipers 1",
+"mode": "tap"
+},
+{
+"id": "wipers2",
+"icon": "wipers",
+"category": "wipers",
+"tr": "Silecek 2",
+"en": "Wipers 2",
+"mode": "tap"
+},
+{
+"id": "wipers3",
+"icon": "wipers",
+"category": "wipers",
+"tr": "Silecek 3",
+"en": "Wipers 3",
+"mode": "tap"
+},
+{
+"id": "wipers4",
+"icon": "wipers",
+"category": "wipers",
+"tr": "Silecek 4",
+"en": "Wipers 4",
+"mode": "tap"
+},
+{
+"id": "engine",
+"icon": "engine",
+"category": "engine",
+"tr": "Motor aç/kapat",
+"en": "Engine on/off",
+"mode": "tap"
+},
+{
+"id": "ignitionon",
+"icon": "key",
+"category": "engine",
+"tr": "Kontak aç",
+"en": "Ignition on",
+"mode": "tap"
+},
+{
+"id": "ignitionoff",
+"icon": "power",
+"category": "engine",
+"tr": "Kontak kapat",
+"en": "Ignition off",
+"mode": "tap"
+},
+{
+"id": "ignitionstrt",
+"icon": "key",
+"category": "engine",
+"tr": "Marş",
+"en": "Start",
+"mode": "hold"
+},
+{
+"id": "engineelect",
+"icon": "electric",
+"category": "engine",
+"tr": "Elektrik",
+"en": "Electrics",
+"mode": "tap"
+},
+{
+"id": "parkingbrake",
+"icon": "parking_brake",
+"category": "brakes",
+"tr": "El freni",
+"en": "Parking brake",
+"mode": "tap"
+},
+{
+"id": "handbrake",
+"icon": "parking_brake",
+"category": "brakes",
+"tr": "El freni (basılı)",
+"en": "Handbrake",
+"mode": "hold"
+},
+{
+"id": "trailerbrake",
+"icon": "trailer",
+"category": "brakes",
+"tr": "Römork freni",
+"en": "Trailer brake",
+"mode": "tap"
+},
+{
+"id": "motorbrake",
+"icon": "brake",
+"category": "brakes",
+"tr": "Motor freni",
+"en": "Engine brake",
+"mode": "tap"
+},
+{
+"id": "engbraketog",
+"icon": "brake",
+"category": "brakes",
+"tr": "Motor freni aç/kapat",
+"en": "Engine brake toggle",
+"mode": "tap"
+},
+{
+"id": "engbrakeup",
+"icon": "plus",
+"category": "brakes",
+"tr": "Motor freni +",
+"en": "Engine brake +",
+"mode": "tap"
+},
+{
+"id": "engbrakedwn",
+"icon": "minus",
+"category": "brakes",
+"tr": "Motor freni −",
+"en": "Engine brake −",
+"mode": "tap"
+},
+{
+"id": "engbrakeauto",
+"icon": "brake",
+"category": "brakes",
+"tr": "Motor freni oto",
+"en": "Engine brake auto",
+"mode": "tap"
+},
+{
+"id": "retarder0",
+"icon": "retarder",
+"category": "brakes",
+"tr": "Retarder 0",
+"en": "Retarder 0",
+"mode": "tap"
+},
+{
+"id": "retarder1",
+"icon": "retarder",
+"category": "brakes",
+"tr": "Retarder 1",
+"en": "Retarder 1",
+"mode": "tap"
+},
+{
+"id": "retarder2",
+"icon": "retarder",
+"category": "brakes",
+"tr": "Retarder 2",
+"en": "Retarder 2",
+"mode": "tap"
+},
+{
+"id": "retarder3",
+"icon": "retarder",
+"category": "brakes",
+"tr": "Retarder 3",
+"en": "Retarder 3",
+"mode": "tap"
+},
+{
+"id": "retarder4",
+"icon": "retarder",
+"category": "brakes",
+"tr": "Retarder 4",
+"en": "Retarder 4",
+"mode": "tap"
+},
+{
+"id": "retarder5",
+"icon": "retarder",
+"category": "brakes",
+"tr": "Retarder 5",
+"en": "Retarder 5",
+"mode": "tap"
+},
+{
+"id": "retarderup",
+"icon": "plus",
+"category": "brakes",
+"tr": "Retarder +",
+"en": "Retarder +",
+"mode": "tap"
+},
+{
+"id": "retarderdown",
+"icon": "minus",
+"category": "brakes",
+"tr": "Retarder −",
+"en": "Retarder −",
+"mode": "tap"
+},
+{
+"id": "retarderauto",
+"icon": "retarder",
+"category": "brakes",
+"tr": "Retarder oto",
+"en": "Retarder auto",
+"mode": "tap"
+},
+{
+"id": "cruiectrl",
+"icon": "cruise",
+"category": "assist",
+"tr": "Hız sabitleyici",
+"en": "Cruise control",
+"mode": "tap"
+},
+{
+"id": "cruiectrlinc",
+"icon": "plus",
+"category": "assist",
+"tr": "Kruz +",
+"en": "Cruise +",
+"mode": "tap"
+},
+{
+"id": "cruiectrldec",
+"icon": "minus",
+"category": "assist",
+"tr": "Kruz −",
+"en": "Cruise −",
+"mode": "tap"
+},
+{
+"id": "cruiectrlres",
+"icon": "resume",
+"category": "assist",
+"tr": "Kruz devam",
+"en": "Cruise resume",
+"mode": "tap"
+},
+{
+"id": "accmode",
+"icon": "cruise",
+"category": "assist",
+"tr": "Adaptif kruz modu",
+"en": "Adaptive cruise mode",
+"mode": "tap"
+},
+{
+"id": "laneassist",
+"icon": "lane",
+"category": "assist",
+"tr": "Şerit asistanı",
+"en": "Lane assist",
+"mode": "tap"
+},
+{
+"id": "laneassmode",
+"icon": "lane",
+"category": "assist",
+"tr": "Şerit asistanı modu",
+"en": "Lane assist mode",
+"mode": "tap"
+},
+{
+"id": "gearup",
+"icon": "chevron_up",
+"category": "drive",
+"tr": "Vites yukarı",
+"en": "Gear up",
+"mode": "tap"
+},
+{
+"id": "geardown",
+"icon": "chevron_down",
+"category": "drive",
+"tr": "Vites aşağı",
+"en": "Gear down",
+"mode": "tap"
+},
+{
+"id": "geardrive",
+"icon": "gearbox",
+"category": "drive",
+"tr": "İleri (D)",
+"en": "Drive",
+"mode": "tap"
+},
+{
+"id": "gearreverse",
+"icon": "gearbox",
+"category": "drive",
+"tr": "Geri (R)",
+"en": "Reverse",
+"mode": "tap"
+},
+{
+"id": "gearsel1tgl",
+"icon": "gearbox",
+"category": "drive",
+"tr": "Yarı vites 1",
+"en": "Splitter",
+"mode": "tap"
+},
+{
+"id": "gearsel2tgl",
+"icon": "gearbox",
+"category": "drive",
+"tr": "Yarı vites 2",
+"en": "Range",
+"mode": "tap"
+},
+{
+"id": "transemi",
+"icon": "gearbox",
+"category": "drive",
+"tr": "Yarı otomatik",
+"en": "Semi-automatic",
+"mode": "tap"
+},
+{
+"id": "tranpwrmode",
+"icon": "electric",
+"category": "drive",
+"tr": "Güç modu",
+"en": "Power mode",
+"mode": "tap"
+},
+{
+"id": "diflock",
+"icon": "diff_lock",
+"category": "axles",
+"tr": "Diferansiyel kilidi",
+"en": "Differential lock",
+"mode": "tap"
+},
+{
+"id": "liftaxle",
+"icon": "lift_axle",
+"category": "axles",
+"tr": "Aks kaldır",
+"en": "Lift axle",
+"mode": "tap"
+},
+{
+"id": "liftaxlet",
+"icon": "lift_axle",
+"category": "axles",
+"tr": "Römork aksı kaldır",
+"en": "Lift trailer axle",
+"mode": "tap"
+},
+{
+"id": "slideaxlefwd",
+"icon": "slide_axle",
+"category": "axles",
+"tr": "Aks ileri",
+"en": "Slide axle forward",
+"mode": "tap"
+},
+{
+"id": "slideaxlebwd",
+"icon": "slide_axle",
+"category": "axles",
+"tr": "Aks geri",
+"en": "Slide axle back",
+"mode": "tap"
+},
+{
+"id": "frontsuspup",
+"icon": "susp_up",
+"category": "axles",
+"tr": "Ön süspansiyon yukarı",
+"en": "Front suspension up",
+"mode": "tap"
+},
+{
+"id": "frontsuspdwn",
+"icon": "susp_down",
+"category": "axles",
+"tr": "Ön süspansiyon aşağı",
+"en": "Front suspension down",
+"mode": "tap"
+},
+{
+"id": "rearsuspup",
+"icon": "susp_up",
+"category": "axles",
+"tr": "Arka süspansiyon yukarı",
+"en": "Rear suspension up",
+"mode": "tap"
+},
+{
+"id": "rearsuspdwn",
+"icon": "susp_down",
+"category": "axles",
+"tr": "Arka süspansiyon aşağı",
+"en": "Rear suspension down",
+"mode": "tap"
+},
+{
+"id": "trlrsuspup",
+"icon": "susp_up",
+"category": "axles",
+"tr": "Römork süspansiyon yukarı",
+"en": "Trailer suspension up",
+"mode": "tap"
+},
+{
+"id": "trlrsuspdwn",
+"icon": "susp_down",
+"category": "axles",
+"tr": "Römork süspansiyon aşağı",
+"en": "Trailer suspension down",
+"mode": "tap"
+},
+{
+"id": "suspreset",
+"icon": "reset",
+"category": "axles",
+"tr": "Süspansiyon sıfırla",
+"en": "Suspension reset",
+"mode": "tap"
+},
+{
+"id": "camcycle",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera değiştir",
+"en": "Cycle camera",
+"mode": "tap"
+},
+{
+"id": "cam1",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 1",
+"en": "Camera 1",
+"mode": "tap"
+},
+{
+"id": "cam2",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 2",
+"en": "Camera 2",
+"mode": "tap"
+},
+{
+"id": "cam3",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 3",
+"en": "Camera 3",
+"mode": "tap"
+},
+{
+"id": "cam4",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 4",
+"en": "Camera 4",
+"mode": "tap"
+},
+{
+"id": "cam5",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 5",
+"en": "Camera 5",
+"mode": "tap"
+},
+{
+"id": "cam6",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 6",
+"en": "Camera 6",
+"mode": "tap"
+},
+{
+"id": "cam7",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 7",
+"en": "Camera 7",
+"mode": "tap"
+},
+{
+"id": "cam8",
+"icon": "camera",
+"category": "view",
+"tr": "Kamera 8",
+"en": "Camera 8",
+"mode": "tap"
+},
+{
+"id": "showmirrors",
+"icon": "mirror",
+"category": "view",
+"tr": "Aynaları göster",
+"en": "Show mirrors",
+"mode": "tap"
+},
+{
+"id": "winlshadeup",
+"icon": "shade",
+"category": "cabin",
+"tr": "Sol perde yukarı",
+"en": "Left shade up",
+"mode": "tap"
+},
+{
+"id": "winlshadedwn",
+"icon": "shade",
+"category": "cabin",
+"tr": "Sol perde aşağı",
+"en": "Left shade down",
+"mode": "tap"
+},
+{
+"id": "winrshadeup",
+"icon": "shade",
+"category": "cabin",
+"tr": "Sağ perde yukarı",
+"en": "Right shade up",
+"mode": "tap"
+},
+{
+"id": "winrshadedwn",
+"icon": "shade",
+"category": "cabin",
+"tr": "Sağ perde aşağı",
+"en": "Right shade down",
+"mode": "tap"
+},
+{
+"id": "entrdoors",
+"icon": "door",
+"category": "cabin",
+"tr": "Kapılar",
+"en": "Doors",
+"mode": "tap"
+},
+{
+"id": "adj_seats",
+"icon": "seat",
+"category": "cabin",
+"tr": "Koltuk ayarı",
+"en": "Seat adjust",
+"mode": "tap"
+},
+{
+"id": "radio",
+"icon": "radio",
+"category": "media",
+"tr": "Radyo",
+"en": "Radio",
+"mode": "tap"
+},
+{
+"id": "radiotoggle",
+"icon": "radio",
+"category": "media",
+"tr": "Radyo aç/kapat",
+"en": "Radio on/off",
+"mode": "tap"
+},
+{
+"id": "radionext",
+"icon": "next",
+"category": "media",
+"tr": "Sonraki istasyon",
+"en": "Next station",
+"mode": "tap"
+},
+{
+"id": "radioprev",
+"icon": "prev",
+"category": "media",
+"tr": "Önceki istasyon",
+"en": "Previous station",
+"mode": "tap"
+},
+{
+"id": "radioup",
+"icon": "volume_up",
+"category": "media",
+"tr": "Radyo sesi +",
+"en": "Radio volume +",
+"mode": "tap"
+},
+{
+"id": "radiodown",
+"icon": "volume_down",
+"category": "media",
+"tr": "Radyo sesi −",
+"en": "Radio volume −",
+"mode": "tap"
+},
+{
+"id": "radiofav",
+"icon": "radio",
+"category": "media",
+"tr": "Favori istasyon",
+"en": "Favourite station",
+"mode": "tap"
+},
+{
+"id": "navmap",
+"icon": "navigation",
+"category": "navigation",
+"tr": "Harita",
+"en": "Map",
+"mode": "tap"
+},
+{
+"id": "infotainment",
+"icon": "screen",
+"category": "navigation",
+"tr": "Bilgi ekranı",
+"en": "Infotainment",
+"mode": "tap"
+},
+{
+"id": "mapzoom_in",
+"icon": "plus",
+"category": "navigation",
+"tr": "Harita yakınlaş",
+"en": "Map zoom in",
+"mode": "tap"
+},
+{
+"id": "mapzoom_out",
+"icon": "minus",
+"category": "navigation",
+"tr": "Harita uzaklaş",
+"en": "Map zoom out",
+"mode": "tap"
+},
+{
+"id": "parking_cams",
+"icon": "camera",
+"category": "navigation",
+"tr": "Park kameraları",
+"en": "Parking cameras",
+"mode": "tap"
+},
+{
+"id": "quicksave",
+"icon": "save",
+"category": "system",
+"tr": "Hızlı kaydet",
+"en": "Quick save",
+"mode": "tap"
+},
+{
+"id": "quickload",
+"icon": "load",
+"category": "system",
+"tr": "Hızlı yükle",
+"en": "Quick load",
+"mode": "tap"
+},
+{
+"id": "quickpark",
+"icon": "parking",
+"category": "system",
+"tr": "Hızlı park",
+"en": "Quick park",
+"mode": "tap"
+},
+{
+"id": "pause",
+"icon": "pause",
+"category": "system",
+"tr": "Duraklat",
+"en": "Pause",
+"mode": "tap"
+},
+{
+"id": "tripreset",
+"icon": "reset",
+"category": "system",
+"tr": "Yolculuk sıfırla",
+"en": "Trip reset",
+"mode": "tap"
+},
+{
+"id": "showhud",
+"icon": "screen",
+"category": "system",
+"tr": "HUD göster",
+"en": "Show HUD",
+"mode": "tap"
+}
+]

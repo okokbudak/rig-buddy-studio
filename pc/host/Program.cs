@@ -1,0 +1,128 @@
+// Rig Buddy PC app. Start it once (or with Windows); it sits in the tray and
+// runs everything the head unit talks to. See README.md.
+//
+//   RigBuddy.exe                     start (or, if already running, say so)
+//   RigBuddy.exe --quit              stop the running app and all services
+//   RigBuddy.exe --restart [svc]     restart server|agent|telemetry (default: all)
+//   RigBuddy.exe --stop <svc> / --start <svc> / --status
+//   RigBuddy.exe --install-plugin    copy the SCS telemetry plugin into ETS2 / ATS (installer, as admin)
+//   RigBuddy.exe --plugin-status     one line per game: is the plugin in it (installer); exit code = games with a problem
+
+static class Program
+{
+    static readonly string[] Commands = ["--quit", "--restart", "--stop", "--start", "--status"];
+
+    [STAThread]
+    static int Main(string[] args)
+    {
+        if (args.Length > 0 && args[0] == "--uninstall") { ApplicationConfiguration.Initialize(); return Uninstaller.Run(args); }
+        if (args.Length > 0 && args[0] == "--install-plugin") return InstallPlugin();
+        if (args.Length > 0 && args[0] == "--fix-plugin") return PluginCheck.CopyMissing() == 0 ? 0 : 1;
+        if (args.Length > 0 && args[0] == "--fix-save") { SaveFormat.Ensure(); return 0; } // installer: text saves for Rig Buddy
+        if (args.Length > 1 && args[0] == "--set-autostart") { Autostart.Set(args[1] == "1"); return 0; } // installer
+        if (args.Length > 0 && args[0] == "--sync-sound") return SoundMods.Sync() == 0 ? 0 : 1; // installer: the sound plugin into the games
+        if (args.Length > 0 && args[0] == "--plugin-status") // installer: did the plugin get into every game
+        {
+            if (GetStdHandle(-11) == IntPtr.Zero) AttachConsole(-1);
+            return PluginCheck.Status(Console.Out);
+        }
+        if (args.Length > 0 && Commands.Contains(args[0]))
+        {
+            string? reply = ControlPort.Send(string.Join(' ', args).TrimStart('-'));
+            // A GUI exe has no console: write to redirected stdout if there is
+            // one (scripts capturing the reply), else into the calling console.
+            if (GetStdHandle(-11) == IntPtr.Zero) AttachConsole(-1);
+            Console.WriteLine(reply ?? "Rig Buddy is not running");
+            return reply == null || reply.StartsWith("error") ? 1 : 0;
+        }
+
+        using var mutex = new Mutex(true, @"Local\RigBuddy.Host", out bool first);
+        if (!first)
+        {
+            ControlPort.Send("show");
+            return 0;
+        }
+
+        var paths = AppPaths.Detect();
+        Log.Init(paths.Logs);
+        Console.WriteLine($"Rig Buddy starting ({(paths.Release ? "release" : "dev")}), app {paths.Root}, data {paths.Data}" +
+                          (paths.Dist != null ? ", bundled services" : ", services from source"));
+        Application.ThreadException += (_, e) => Console.WriteLine($"ui error: {e.Exception}");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Console.WriteLine($"fatal: {e.ExceptionObject}");
+        ApplicationConfiguration.Initialize();
+
+        // Windows can reserve our ports (Hyper-V / WSL / Docker): say so instead of crashing
+        var blocked = PortCheck.Find();
+        foreach (var p in blocked.Where(p => !p.Critical))
+            Console.WriteLine($"ports: {p.Proto} {p.Port} is not available ({p.Error}); what uses it stays off");
+        if (blocked.Any(p => p.Critical))
+        {
+            PortCheck.Explain(blocked.Where(p => p.Critical).ToList());
+            return 1;
+        }
+
+        var bridge = new TelemetryBridge();
+        try { bridge.Start(); }
+        catch (Exception e) { Console.WriteLine($"bridge: disabled ({e.Message}); is another Rig Buddy running?"); }
+        Discovery.Start();
+        WheelButtons.Start(); // wheel buttons that switch the screens of the displays and tablets
+        // the sound plugin that came with this version: back into the games if a game update removed it, and updated
+        Task.Run(() => { try { SoundMods.Sync(); } catch (Exception e) { Console.WriteLine($"sound plugin: {e.Message}"); } });
+        // rigbuddy-telemetry.dll (telemetry, bus job and sound in one) the same way, with the user's rights; a game under Program Files gets it
+        // from the installer or the Fix now button
+        Task.Run(() => { try { if (!PluginCheck.GameRunning()) PluginCheck.CopyMissing(); } catch (Exception e) { Console.WriteLine($"telemetry plugin: {e.Message}"); } });
+        SaveFormat.Watch(); // the saves must be text (g_save_format "2"): set when a game is not running
+
+        var sup = new Supervisor(paths);
+        // new map data: the server reloads it (or starts, on the first build)
+        var maps = new MapBuilder(paths, onBuilt: () => sup.Restart("server"));
+        var app = new TrayApp(sup, bridge, maps, quiet: args.Contains("--autostart"));
+        try { ControlPort.Listen(cmd => Handle(cmd, sup, app)); }
+        catch (Exception e) { Console.WriteLine($"control port: disabled ({e.Message}); RigBuddy.exe --quit and friends will not work"); }
+        sup.Start();
+        if (sup.SetupProblem == null) maps.Check();
+        Application.Run(app);
+        sup.StopAll();
+        maps.Stop();
+        Console.WriteLine("Rig Buddy stopped");
+        return 0;
+    }
+
+    /** plugin\rigbuddy-telemetry.dll (next to the exe) -> <game>\bin\win_x64\plugins, for each installed game; Rig Buddy's older plugin files go. */
+    static int InstallPlugin() => PluginCheck.CopyMissing() == 0 ? 0 : 1;
+
+    static string Handle(string cmd, Supervisor sup, TrayApp app)
+    {
+        var parts = cmd.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        string verb = parts.Length > 0 ? parts[0] : "";
+        string? svc = parts.Length > 1 ? parts[1] : null;
+        // the app's music controls (through the agent): "media" = the state of the player as JSON, "media <action>" = a command
+        if (verb == "media")
+        {
+            if (svc != null && !MediaControl.Command(svc, parts.Length > 2 ? parts[2] : null)) return "error: the player did not take the command";
+            return MediaControl.State();
+        }
+        // the button box: "key down|up|tap <key[+key]>" and "key release" (see KeyInjector.cs)
+        if (verb == "key") return KeyInjector.Command(parts.Length > 1 ? parts[1] : "", parts.Length > 2 ? parts[2] : null);
+        if (svc != null && sup.Find(svc) == null) return $"error: unknown service '{svc}' ({string.Join(", ", sup.Services.Select(s => s.Name))})";
+        switch (verb)
+        {
+            case "quit": app.Post(app.Exit); return "ok";
+            case "show": app.Post(app.ShowWindow); return "ok";
+            case "logs": app.Post(app.ShowLogs); return "ok";
+            case "sound": app.Post(app.ShowSound); return "ok";
+            case "restart": sup.Restart(svc); return "ok";
+            case "stop" when svc != null: sup.SetEnabled(svc, false); return "ok";
+            case "start" when svc != null: sup.SetEnabled(svc, true); return "ok";
+            case "status":
+                return string.Join("; ", sup.Services.Select(s => $"{s.Name}={s.State.ToString().ToLowerInvariant()}")) +
+                       (sup.SetupProblem != null ? $"; setup: {sup.SetupProblem}" : "");
+            default: return $"error: unknown command '{cmd}'";
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool AttachConsole(int processId);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern IntPtr GetStdHandle(int handle);
+}

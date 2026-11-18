@@ -1,0 +1,2000 @@
+package tr.rigbuddy;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Outline;
+import android.graphics.Paint;
+import android.graphics.PointF;
+import android.graphics.RectF;
+import android.os.Bundle;
+import android.os.SystemClock;
+import android.text.InputType;
+import android.util.Log;
+import android.view.Choreographer;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
+import android.view.WindowManager;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+
+import com.mapbox.geojson.Feature;
+import com.mapbox.geojson.FeatureCollection;
+import com.mapbox.geojson.LineString;
+import com.mapbox.geojson.Point;
+import com.mapbox.geojson.Polygon;
+import com.mapbox.mapboxsdk.Mapbox;
+import com.mapbox.mapboxsdk.camera.CameraPosition;
+import com.mapbox.mapboxsdk.camera.CameraUpdateFactory;
+import com.mapbox.mapboxsdk.geometry.LatLng;
+import com.mapbox.mapboxsdk.maps.MapView;
+import com.mapbox.mapboxsdk.maps.MapboxMap;
+import com.mapbox.mapboxsdk.maps.Style;
+import com.mapbox.mapboxsdk.offline.OfflineManager;
+import com.mapbox.mapboxsdk.style.expressions.Expression;
+import com.mapbox.mapboxsdk.style.layers.FillLayer;
+import com.mapbox.mapboxsdk.style.layers.Layer;
+import com.mapbox.mapboxsdk.style.layers.LineLayer;
+import com.mapbox.mapboxsdk.style.layers.Property;
+import com.mapbox.mapboxsdk.style.layers.PropertyFactory;
+import com.mapbox.mapboxsdk.style.layers.SymbolLayer;
+import com.mapbox.mapboxsdk.style.sources.GeoJsonSource;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+import tr.rigbuddy.agent.AgentClient;
+import tr.rigbuddy.agent.PcFinder;
+import tr.rigbuddy.map.LocalTileServer;
+import tr.rigbuddy.map.MapStyle;
+import tr.rigbuddy.map.TileDownloader;
+import tr.rigbuddy.nav.NavClient;
+import tr.rigbuddy.nav.Route;
+import tr.rigbuddy.nav.TruckTracker;
+import tr.rigbuddy.ui.HomeScreen;
+import tr.rigbuddy.ui.JobsScreen;
+import tr.rigbuddy.ui.ManeuverIconView;
+import tr.rigbuddy.ui.ProfileScreen;
+import tr.rigbuddy.ui.MusicScreen;
+import tr.rigbuddy.ui.SearchPanel;
+import tr.rigbuddy.ui.ButtonBoxScreen;
+import tr.rigbuddy.ui.SoundScreen;
+import tr.rigbuddy.ui.TruckArrowView;
+import tr.rigbuddy.ui.Ui;
+import tr.rigbuddy.ui.VehicleScreen;
+
+public final class MainActivity extends Activity implements NavClient.Listener, Choreographer.FrameCallback {
+  private static final String TAG = "RigBuddy";
+  private static final long FRAME_INTERVAL_MS = 33;   // ~30 fps is plenty and saves the CPU
+  private static final long GUIDANCE_INTERVAL_MS = 250;
+  private static final long IDLE_FRAME_DELAY_MS = 200;
+  private boolean idleLoop;
+  private long lastTripMs;
+  private static final double FOCUS_FROM_TOP = 0.70;   // chevron position, fraction of height
+  private static final double FOLLOW_TILT = 45;
+
+  private MapView mapView;
+  private MapboxMap map;
+  private Style style;
+  private GeoJsonSource routeSource, destSource, truckSource, pickSource;
+  private Route routeDrawn;
+  private int routeFilterStep = Integer.MIN_VALUE;
+  /** What the stops between the truck and the destination are: a job's pickup, or a bus line's stops (routeJob). */
+  private boolean routeStopsArePickup = true;
+  private SearchPanel searchPanel;
+  private View destCard;
+  private TextView destTitle, destSubtitle;
+  private SearchPanel.Result pendingDest;
+
+  private TruckArrowView truckArrow;
+  private View maneuverPanel, thenPanel, tripPanel, recenter;
+  private ManeuverIconView maneuverIcon, thenIcon;
+  private TextView maneuverDistance, maneuverText, tripTime, tripDetail, speedView, speedLimitView, statusView, messageView;
+
+  private SharedPreferences prefs;
+  private tr.rigbuddy.update.AppUpdater updater; // "new version" window: download from the PC and install
+  private NavClient nav;
+  private final TruckTracker tracker = new TruckTracker();
+  private final TruckTracker.Pose pose = new TruckTracker.Pose();
+  private boolean serverPositionSeen; // the navigation server has sent at least one position
+  private final Route.Progress progress = new Route.Progress();
+  private final Map<String, LocalTileServer> tileServers = new HashMap<>();
+  private TileDownloader tiles;
+
+  private String game = "ets2";
+  private boolean darkMode;
+  private boolean following = true;
+  private boolean frameLoopRunning;
+  private long lastFrameMs, lastGuidanceMs, lastTruckSourceMs, lastHudMs, lastDebugLogMs;
+  private double smoothedZoom = 13.2;
+
+  // head-unit shell
+  private AgentClient agent;
+  private HomeScreen home;
+  private VehicleScreen vehicle;
+  private JobsScreen jobs;
+  private ProfileScreen profile;
+  private SoundScreen soundScreen;
+  private ButtonBoxScreen buttonBox;
+  private MusicScreen musicScreen;
+  private FrameLayout screenHost;
+  private String screen = "home";
+  private final Map<String, View> screenViews = new HashMap<>();
+  private final Map<String, ImageView> railIcons = new HashMap<>();
+  private TextView railClock;
+  private tr.rigbuddy.ui.BatteryView railBattery;
+  private View railAgentDot, railNavDot;
+  private JSONObject lastTelemetry;
+  private boolean staleBinding;
+  /** When (uptimeMillis) the agent last sent telemetry, the navigation server last sent a position, and we last re-subscribed. */
+  private long lastTelemetryAt, lastPositionAt, lastNavRestartAt;
+  private double lastSpeedKph;
+
+  private Route route;
+  private int routeStep = -1;       // step currently being driven (flat index)
+  private int serverStepHint = 0;   // from routeProgress events
+  private String requestedDestNode;
+  /** Delivery node of the job taken in the game; the map's route button drives there. */
+  private String jobDestNode;
+  private String busRoutedNode; // the bus stop the route was last planned to by itself (onBusJob)
+  private boolean pickingRoute;
+  private boolean jobSeen;         // the PC has reported a job (telemetry)
+  private long jobGoneSinceMs;     // since when it reports none
+
+  /** Short side, in dp, the screens are designed for (head units: 720). */
+  private static final int MIN_SHORT_SIDE_DP = 600;
+
+  /**
+   * Phones in landscape are only ~400 dp tall: draw the UI at a lower density
+   * there so it keeps the head-unit proportions (everything scaled down evenly)
+   * instead of clipping. Also applies the in-app language choice.
+   */
+  @Override
+  protected void attachBaseContext(android.content.Context base) {
+    android.content.res.Configuration config = new android.content.res.Configuration();
+    android.util.DisplayMetrics dm = base.getResources().getDisplayMetrics();
+    int shortPx = Math.min(dm.widthPixels, dm.heightPixels);
+    if (shortPx * 160 / dm.densityDpi < MIN_SHORT_SIDE_DP - 40) {
+      config.densityDpi = Math.max(120, shortPx * 160 / MIN_SHORT_SIDE_DP);
+    }
+    Locale locale = Lang.locale(base.getSharedPreferences("rigbuddy", MODE_PRIVATE));
+    if (locale != null) config.setLocale(locale);
+    super.attachBaseContext(base);
+    applyOverrideConfiguration(config);
+  }
+
+  @Override
+  protected void onCreate(Bundle savedInstanceState) {
+    prefs = getSharedPreferences("rigbuddy", MODE_PRIVATE);
+    tr.rigbuddy.agent.AgentAuth.setToken(prefs.getString("agentToken", ""));
+    updater = new tr.rigbuddy.update.AppUpdater(this, prefs, this::host, AgentClient.PORT);
+    // theme first: every screen reads Ui's palette while it is built
+    Ui.applyTheme(Ui.resolveDark(this, Ui.themeSetting(prefs)));
+    // the map follows the app's theme until the game says whether it is day or
+    // night in the cab; without this a dark app showed a white map
+    darkMode = Ui.dark;
+    setTheme(Ui.dark ? R.style.AppTheme_Dark : R.style.AppTheme);
+    super.onCreate(savedInstanceState);
+    Ui.init(this); // strings and number formats of the chosen language
+    Mapbox.getInstance(getApplicationContext());
+    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    setContentView(R.layout.activity_main);
+    ((ViewGroup) findViewById(android.R.id.content)).getChildAt(0).setBackgroundColor(Ui.BG);
+    findViewById(R.id.rail).setBackgroundColor(Ui.BG);
+    findViewById(R.id.screenHost).setBackgroundColor(Ui.BG);
+    hideSystemUi();
+
+    applyIntent(getIntent());
+
+    mapView = findViewById(R.id.map);
+    truckArrow = findViewById(R.id.truckArrow);
+    maneuverPanel = findViewById(R.id.maneuverPanel);
+    thenPanel = findViewById(R.id.thenPanel);
+    tripPanel = findViewById(R.id.tripPanel);
+    recenter = findViewById(R.id.recenter);
+    maneuverIcon = findViewById(R.id.maneuverIcon);
+    thenIcon = findViewById(R.id.thenIcon);
+    maneuverDistance = findViewById(R.id.maneuverDistance);
+    maneuverText = findViewById(R.id.maneuverText);
+    tripTime = findViewById(R.id.tripTime);
+    tripDetail = findViewById(R.id.tripDetail);
+    speedView = findViewById(R.id.speed);
+    speedLimitView = findViewById(R.id.speedLimit);
+    statusView = findViewById(R.id.status);
+    messageView = findViewById(R.id.message);
+
+    destCard = findViewById(R.id.destCard);
+    destTitle = findViewById(R.id.destTitle);
+    destSubtitle = findViewById(R.id.destSubtitle);
+
+    recenter.setOnClickListener(v -> setFollowing(true));
+    findViewById(R.id.settings).setOnClickListener(v -> showSettings());
+    findViewById(R.id.searchButton).setOnClickListener(v -> {
+      hideDestCard();
+      searchPanel.show(pose.valid ? pose.lon : 0, pose.valid ? pose.lat : 0);
+    });
+    findViewById(R.id.jobRouteButton).setOnClickListener(v -> {
+      hideDestCard();
+      if (jobDestNode == null) {
+        flashMessage(Ui.s(R.string.route_no_job));
+        return;
+      }
+      pickingRoute = false; // a stuck earlier attempt must not swallow this tap
+      routeTo(jobDestNode);
+      setFollowing(true);
+    });
+    findViewById(R.id.cancelRoute).setOnClickListener(v -> cancelRoute());
+    findViewById(R.id.destGo).setOnClickListener(v -> {
+      SearchPanel.Result r = pendingDest;
+      hideDestCard();
+      if (r != null) {
+        routeTo(r.nodeUid);
+        setFollowing(true);
+      }
+    });
+    findViewById(R.id.destClose).setOnClickListener(v -> hideDestCard());
+    findViewById(R.id.root).addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeTruckArrow());
+
+    mapView.setMaximumFps(30);
+    mapView.addOnDidFailLoadingMapListener(msg -> {
+      Log.e(TAG, "map failed to load: " + msg);
+      showMessage(Ui.s(R.string.map_load_failed, msg));
+    });
+    mapView.onCreate(savedInstanceState);
+    mapView.getMapAsync(this::onMapReady);
+
+    // Don't write tiles/styles to the eMMC cache; everything is local anyway.
+    OfflineManager.getInstance(getApplicationContext()).setMaximumAmbientCacheSize(0, null);
+
+    nav = new NavClient(prefs, this);
+    searchPanel = new SearchPanel(findViewById(R.id.searchPanel), nav, this::showDestCard);
+    tiles = new TileDownloader(prefs, mapDir(), new TileDownloader.Listener() {
+      @Override
+      public void onProgress(String g, double fraction, long total) {
+        showMessage(Ui.s(R.string.map_downloading, (int) Math.round(fraction * 100), (int) (total / 1_000_000)));
+      }
+
+      @Override
+      public void onUpdated(String g, File file) {
+        if (g.equals("sprites")) {
+          loadStyle();
+          return;
+        }
+        LocalTileServer old = tileServers.remove(g);
+        if (old != null) old.stop();
+        tileUrlCache.remove(g);
+        if (g.equals(game)) loadStyle();
+        flashMessage(Ui.s(R.string.map_updated));
+      }
+
+      @Override
+      public void onFailed(String g, String error) {
+        if (!TileDownloader.fileFor(mapDir(), g).exists()) {
+          showMessage(Ui.s(R.string.map_download_failed, error));
+        }
+      }
+    });
+    setupShell();
+  }
+
+  /** Where the map files live: app-specific external storage, or internal if there is none. */
+  private File mapDir() {
+    File d = getExternalFilesDir(null);
+    return d != null ? d : getFilesDir();
+  }
+
+  private void syncTiles() {
+    if (!host().isEmpty()) tiles.sync(host(), AgentClient.PORT, game);
+  }
+
+  // --- head-unit shell: rail + screens ---------------------------------------------
+
+  private void setupShell() {
+    agent = new AgentClient(new AgentClient.Listener() {
+      @Override
+      public void onTelemetry(JSONObject t) {
+        lastTelemetry = t;
+        if (t != null) {
+          lastTelemetryAt = SystemClock.uptimeMillis();
+          JSONObject truck = t.optJSONObject("truck");
+          lastSpeedKph = truck != null ? truck.optDouble("speedKph", 0) : 0;
+          JSONObject busJob = t.optJSONObject("busJob");
+          if (t.optJSONObject("job") != null || busJob != null) {
+            jobSeen = true;
+            jobGoneSinceMs = 0;
+            if (busJob != null) onBusJob(busJob);
+          } else if (jobSeen) {
+            long nowMs = SystemClock.uptimeMillis();
+            if (jobGoneSinceMs == 0) jobGoneSinceMs = nowMs;
+            else if (nowMs - jobGoneSinceMs > 5000) { // gone for 5 s: cancelled (a brief gap while loading is not)
+              jobSeen = false;
+              onJobGone();
+            }
+          }
+          JSONObject p = t.optJSONObject("position");
+          if (p != null) {
+            tracker.onAgentSample(t.optString("game", "ets2"), p.optDouble("x", Double.NaN), p.optDouble("z", Double.NaN),
+                p.optDouble("heading"), p.optDouble("speedMs"), t.optBoolean("paused"), p.optDouble("t", Double.NaN));
+          }
+        }
+        home.onTelemetry(t);
+        if ("vehicle".equals(screen)) vehicle.onTelemetry(t);
+        if ("jobs".equals(screen)) jobs.onTelemetry(t);
+      }
+
+      @Override
+      public void onSaveChanged() {
+        jobs.onSaveChanged();
+        profile.onSaveChanged();
+      }
+
+      @Override
+      public void onRadio(JSONObject radio) {
+        musicScreen.onRadio(radio, agent.isConnected());
+        home.setRadio(radio, agent.isConnected());
+      }
+
+      @Override
+      public void onAgentConnected(boolean connected) {
+        railAgentDot.setBackground(Ui.rounded(connected ? Ui.GREEN : Ui.RED, Ui.dp(MainActivity.this, 5)));
+        if (connected) {
+          profile.load();
+          syncTiles();
+          checkUpdate();
+        } else {
+          scheduleRediscovery();
+        }
+      }
+
+      @Override
+      public void onAuthRequired() {
+        showPairDialog(null);
+      }
+
+      @Override
+      public void onButton(JSONObject result) {
+        if ("screen".equals(result.optString("type"))) { // a wheel button on the PC: one screen on or back, round the end
+          stepScreen("prev".equals(result.optString("dir")) ? -1 : 1);
+          return;
+        }
+        if (buttonBox != null) buttonBox.onResult(result);
+      }
+    });
+
+    screenHost = findViewById(R.id.screenHost);
+    home = new HomeScreen(this, new HomeScreen.Actions() {
+      @Override
+      public void open(String name) {
+        if ("search".equals(name)) {
+          showScreen("map");
+          hideDestCard();
+          searchPanel.show(pose.valid ? pose.lon : 0, pose.valid ? pose.lat : 0);
+        } else {
+          showScreen(name);
+        }
+      }
+    });
+    vehicle = new VehicleScreen(this);
+    jobs = new JobsScreen(this, agent, this::routeJob);
+    profile = new ProfileScreen(this, agent, (p, err) -> home.setProfile(p, err));
+    soundScreen = new SoundScreen(this, agent);
+    musicScreen = new MusicScreen(this, agent, home::setMedia);
+    buttonBox = new ButtonBoxScreen(this, agent);
+    addScreen("home", home.view());
+    addScreen("vehicle", vehicle.view());
+    addScreen("jobs", jobs.view());
+    addScreen("profile", profile.view());
+    addScreen("sound", soundScreen.view());
+    addScreen("music", musicScreen.view());
+    addScreen("buttons", buttonBox.view());
+    screenViews.put("map", findViewById(R.id.root));
+
+    LinearLayout rail = findViewById(R.id.rail);
+    rail.addView(Ui.spacer(this), Ui.hweight(1)); // the tiles sit in the middle of the rail
+    addRailButton(rail, "home", R.drawable.ic_home, Ui.s(R.string.rail_home));
+    addRailButton(rail, "map", R.drawable.ic_map, Ui.s(R.string.rail_map));
+    addRailButton(rail, "vehicle", R.drawable.ic_truck, Ui.s(R.string.rail_vehicle));
+    addRailButton(rail, "jobs", R.drawable.ic_work, Ui.s(R.string.rail_jobs));
+    addRailButton(rail, "profile", R.drawable.ic_person, Ui.s(R.string.rail_profile));
+    addRailButton(rail, "music", R.drawable.ic_music, Ui.s(R.string.rail_music));
+    addRailButton(rail, "sound", R.drawable.ic_sound, Ui.s(R.string.rail_sound));
+    addRailButton(rail, "buttons", R.drawable.ic_buttons, Ui.s(R.string.rail_buttons));
+    rail.addView(Ui.spacer(this), Ui.hweight(1));
+    // no settings button: the clock and the NAV / PC lights at the bottom open the settings
+    LinearLayout footer = Ui.column(this);
+    footer.setGravity(Gravity.CENTER_HORIZONTAL);
+    int fp = Ui.dp(this, 8);
+    footer.setPadding(fp, fp, fp, fp);
+    android.graphics.drawable.StateListDrawable footerBg = new android.graphics.drawable.StateListDrawable();
+    footerBg.addState(new int[] {android.R.attr.state_pressed}, Ui.rounded(Ui.CARD_PRESSED, Ui.dp(this, 16)));
+    footerBg.addState(new int[] {}, Ui.rounded(Ui.CARD, Ui.dp(this, 16)));
+    footer.setBackground(footerBg);
+    footer.setClickable(true);
+    footer.setContentDescription(Ui.s(R.string.rail_settings));
+    footer.setOnClickListener(v -> showSettings());
+    railClock = Ui.text(this, compactRail() ? 16 : 22, Ui.TEXT, true);
+    railClock.setGravity(Gravity.CENTER);
+    footer.addView(railClock, Ui.matchWrap());
+    railBattery = new tr.rigbuddy.ui.BatteryView(this, compactRail() ? 11 : 13);   // this device's charge, under the clock
+    footer.addView(railBattery, Ui.margins(Ui.matchWrap(), this, 0, 2, 0, 0));
+    railBattery.update();
+    LinearLayout dots = Ui.row(this);
+    dots.setGravity(Gravity.CENTER);
+    railNavDot = dot(dots, "NAV");
+    railAgentDot = dot(dots, "PC");
+    footer.addView(dots, Ui.margins(Ui.matchWrap(), this, 0, 8, 0, 0));
+    rail.addView(footer, Ui.margins(Ui.matchWrap(), this, 6, 0, 6, 4));
+    buildPageDots();
+    swipeDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+      @Override
+      public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
+        return e1 != null && onScreenSwipe(e1, e2, vx);
+      }
+    });
+    tickClock();
+    showScreen("home");
+  }
+
+  private View dot(LinearLayout parent, String label) {
+    LinearLayout col = Ui.column(this);
+    col.setGravity(Gravity.CENTER_HORIZONTAL);
+    View d = new View(this);
+    d.setBackground(Ui.rounded(Ui.RED, Ui.dp(this, 5)));
+    col.addView(d, new LinearLayout.LayoutParams(Ui.dp(this, 10), Ui.dp(this, 10)));
+    col.addView(Ui.text(this, label, 11, Ui.TEXT2, false), Ui.margins(Ui.wrap(), this, 0, 4, 0, 0));
+    parent.addView(col, Ui.margins(Ui.wrap(), this, 8, 0, 8, 0));
+    return d;
+  }
+
+  private final Runnable clockTicker = this::tickClock;
+
+  private void tickClock() {
+    railClock.setText(new SimpleDateFormat("HH:mm", Ui.LOCALE).format(new Date()));
+    railBattery.update();
+    home.tick();
+    railClock.removeCallbacks(clockTicker);
+    railClock.postDelayed(clockTicker, 15_000);
+  }
+
+  private void addScreen(String name, View v) {
+    v.setVisibility(View.GONE);
+    screenHost.addView(v, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    screenViews.put(name, v);
+  }
+
+  private void addRailButton(LinearLayout rail, String name, int icon, String label) {
+    railIcons.put(name, addRailAction(rail, icon, label, () -> showScreen(name)));
+  }
+
+  /** Phones in landscape (~400 dp tall): icons only, so the rail fits without scrolling. */
+  private boolean compactRail() {
+    return getResources().getConfiguration().screenHeightDp < 560;
+  }
+
+  /**
+   * CarPlay-style dock: big rounded-square tiles, icon only (the name is the
+   * content description). The size follows the screen height so the eight
+   * entries and the clock still fit a 720 px head unit; phones scroll.
+   */
+  private int railTileDp() {
+    int h = getResources().getConfiguration().screenHeightDp;
+    return Math.max(44, Math.min(68, (h - 130) / 8 - 8));
+  }
+
+  private float railRadius() {
+    return Ui.dp(this, railTileDp() * 0.3f);
+  }
+
+  private ImageView addRailAction(LinearLayout rail, int icon, String label, Runnable action) {
+    int tile = railTileDp();
+    LinearLayout b = Ui.column(this);
+    b.setGravity(Gravity.CENTER);
+    ImageView iv = new ImageView(this);
+    iv.setImageResource(icon);
+    int ip = Ui.dp(this, tile * 0.27f);
+    iv.setPadding(ip, ip, ip, ip);
+    iv.setContentDescription(label);
+    iv.setBackground(Ui.rounded(Ui.CARD, railRadius()));
+    b.addView(iv, new LinearLayout.LayoutParams(Ui.dp(this, tile), Ui.dp(this, tile)));
+    b.setOnClickListener(v -> action.run());
+    rail.addView(b, Ui.margins(Ui.matchWrap(), this, 0, 4, 0, 4));
+    iv.setColorFilter(Ui.TEXT2);
+    return iv;
+  }
+
+  // --- swiping between the screens, with one dot per screen under them -------------
+  private static final String[] SCREEN_ORDER = {"home", "map", "vehicle", "jobs", "profile", "music", "sound", "buttons"};
+  private GestureDetector swipeDetector;
+  private LinearLayout pageDots;
+
+  private void buildPageDots() {
+    pageDots = findViewById(R.id.pageDots);
+    for (int i = 0; i < SCREEN_ORDER.length; i++) {
+      pageDots.addView(new View(this), Ui.margins(new LinearLayout.LayoutParams(Ui.dp(this, 8), Ui.dp(this, 8)), this, 5, 0, 5, 0));
+    }
+  }
+
+  private void updatePageDots(String name) {
+    if (pageDots == null) return;
+    int at = java.util.Arrays.asList(SCREEN_ORDER).indexOf(name);
+    for (int i = 0; i < pageDots.getChildCount(); i++) {
+      pageDots.getChildAt(i).setBackground(Ui.rounded(i == at ? Ui.ACCENT : Ui.TRACK, Ui.dp(this, 4)));
+    }
+  }
+
+  /** A quick horizontal fling over the screens goes to the next or previous one. */
+  /** The next / previous screen of the swipe order, going round at the ends (the wheel buttons). */
+  private void stepScreen(int delta) {
+    int n = SCREEN_ORDER.length;
+    int i = java.util.Arrays.asList(SCREEN_ORDER).indexOf(screen);
+    showScreen(SCREEN_ORDER[((i < 0 ? 0 : i) + delta + n) % n]);
+  }
+
+  private boolean onScreenSwipe(MotionEvent from, MotionEvent to, float vx) {
+    float dx = to.getX() - from.getX(), dy = to.getY() - from.getY();
+    if (Math.abs(dx) < Ui.dp(this, 120) || Math.abs(dx) < 2 * Math.abs(dy) || Math.abs(vx) < 900) return false;
+    View screens = findViewById(R.id.screens);
+    int[] at = new int[2];
+    screens.getLocationOnScreen(at);
+    float x = from.getRawX() - at[0];
+    if (x < 0 || x > screens.getWidth()) return false; // started on the rail
+    // the map pans on touch, so it only swipes from its edges
+    if ("map".equals(screen)) {
+      float edge = Ui.dp(this, 56);
+      if (x > edge && x < screens.getWidth() - edge) return false;
+    }
+    int i = java.util.Arrays.asList(SCREEN_ORDER).indexOf(screen) + (dx < 0 ? 1 : -1);
+    if (i < 0 || i >= SCREEN_ORDER.length) return false;
+    showScreen(SCREEN_ORDER[i]);
+    return true;
+  }
+
+  @Override
+  public boolean dispatchTouchEvent(MotionEvent ev) {
+    if (swipeDetector != null) swipeDetector.onTouchEvent(ev);
+    return super.dispatchTouchEvent(ev);
+  }
+
+  private boolean mapCardMode;
+  private final View.OnLayoutChangeListener mapSlotListener =
+      (v, l, t, r, b, ol, ot, or, ob) -> layoutMapCard();
+  /** Map buttons and panels that only make sense on the full map, hidden in the home card. */
+  private static final int[] MAP_ONLY_OVERLAYS = {
+      R.id.settings, R.id.searchButton, R.id.jobRouteButton, R.id.recenter, R.id.cancelRoute, R.id.destCard,
+      R.id.searchPanel, R.id.status, R.id.message};
+
+  /**
+   * The home screen is transparent over its map card: the real map view is resized
+   * to that card (rounded, no buttons) and keeps following the truck.
+   */
+  private void setMapCardMode(boolean card) {
+    if (card == mapCardMode) {
+      if (card) layoutMapCard();
+      return;
+    }
+    mapCardMode = card;
+    View mapRoot = findViewById(R.id.root);
+    View slot = home.mapSlot();
+    screenHost.setBackgroundColor(card ? Color.TRANSPARENT : Ui.BG);
+    for (int id : MAP_ONLY_OVERLAYS) findViewById(id).setAlpha(card ? 0f : 1f);
+    if (card) {
+      final float radius = Ui.dp(this, 22);
+      mapRoot.setOutlineProvider(new ViewOutlineProvider() {
+        @Override
+        public void getOutline(View v, Outline o) {
+          o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius);
+        }
+      });
+      mapRoot.setClipToOutline(true);
+      slot.addOnLayoutChangeListener(mapSlotListener);
+      layoutMapCard();
+    } else {
+      slot.removeOnLayoutChangeListener(mapSlotListener);
+      mapRoot.setClipToOutline(false);
+      mapRoot.setOutlineProvider(ViewOutlineProvider.BACKGROUND);
+      mapRoot.setLayoutParams(new FrameLayout.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+  }
+
+  private void layoutMapCard() {
+    if (!mapCardMode) return;
+    View slot = home.mapSlot();
+    if (slot.getWidth() == 0 || slot.getHeight() == 0) return;
+    int[] a = new int[2], b = new int[2];
+    slot.getLocationInWindow(a);
+    findViewById(R.id.screens).getLocationInWindow(b);
+    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(slot.getWidth(), slot.getHeight());
+    lp.leftMargin = a[0] - b[0];
+    lp.topMargin = a[1] - b[1];
+    View mapRoot = findViewById(R.id.root);
+    ViewGroup.LayoutParams old = mapRoot.getLayoutParams();
+    if (old instanceof FrameLayout.LayoutParams) {
+      FrameLayout.LayoutParams o = (FrameLayout.LayoutParams) old;
+      if (o.width == lp.width && o.height == lp.height && o.leftMargin == lp.leftMargin && o.topMargin == lp.topMargin) return;
+    }
+    mapRoot.setLayoutParams(lp);
+  }
+
+  /** Map stays underneath (its GL surface survives); other screens cover it. */
+  private View veil;
+  private boolean switching;
+  private String pendingScreen;
+
+  /** Changes screen with a soft dip through the background colour instead of a hard cut. */
+  private void showScreen(String name) {
+    if (veil == null) veil = findViewById(R.id.veil);
+    if (veil == null || name.equals(screen)) {
+      applyScreen(name);
+      return;
+    }
+    screen = name; // the logical screen changes now; the views follow behind the veil
+    pendingScreen = name;
+    if (switching) return; // the running change picks up the latest choice
+    switching = true;
+    veil.setBackgroundColor(Ui.BG);
+    veil.animate().cancel();
+    veil.animate().alpha(1f).setDuration(110).withEndAction(() -> {
+      applyScreen(pendingScreen);
+      veil.animate().alpha(0f).setDuration(240).withEndAction(() -> switching = false).start();
+    }).start();
+  }
+
+  private void applyScreen(String name) {
+    screen = name;
+    boolean isMap = "map".equals(name);
+    setMapCardMode("home".equals(name));
+    updatePageDots(name);
+    screenHost.setVisibility(isMap ? View.GONE : View.VISIBLE);
+    for (Map.Entry<String, View> e : screenViews.entrySet()) {
+      if (!"map".equals(e.getKey())) e.getValue().setVisibility(e.getKey().equals(name) ? View.VISIBLE : View.GONE);
+    }
+    for (Map.Entry<String, ImageView> e : railIcons.entrySet()) {
+      boolean on = e.getKey().equals(name);
+      e.getValue().setColorFilter(on ? Ui.ON_ACCENT : Ui.TEXT2);
+      e.getValue().setBackground(Ui.rounded(on ? Ui.ACCENT : Ui.CARD, railRadius()));
+    }
+    if ("vehicle".equals(name)) vehicle.onTelemetry(lastTelemetry);
+    if ("jobs".equals(name)) {
+      jobs.onTelemetry(lastTelemetry);
+      jobs.onShown();
+    }
+    if ("profile".equals(name)) profile.onShown();
+    if ("sound".equals(name)) soundScreen.onShown();
+    buttonBox.setActive("buttons".equals(name)); // lets go of held keys when the screen is left
+    musicScreen.setActive("music".equals(name) || "home".equals(name)); // polls the PC player only while it is shown (home has its card)
+    if (isMap) hideSystemUi();
+  }
+
+  /**
+   * From the jobs screen: truck -> nodes[0] (-> nodes[1] -> ...) as a multi-segment route: a job's pickup and
+   * delivery, or a bus line's stops in order. Nodes the map does not have are left out.
+   */
+  private void routeJob(java.util.List<String> nodes, String label) {
+    JSONArray waypoints = new JSONArray();
+    for (String n : nodes) if (n != null && !n.isEmpty() && !"null".equals(n)) waypoints.put(n);
+    if (waypoints.length() == 0) {
+      flashMessage(Ui.s(R.string.company_not_on_map));
+      return;
+    }
+    showScreen("map");
+    setFollowing(true);
+    if (waypoints.length() == 1) {
+      routeTo(waypoints.optString(0));
+      return;
+    }
+    String destNode = waypoints.optString(waypoints.length() - 1);
+    routeStopsArePickup = waypoints.length() == 2; // a job: pickup, delivery; a bus line: its stops
+    flashMessage(Ui.s(R.string.route_calculating, label));
+    nav.query("app.generateRouteFromNodeUids", waypoints, (data, error) -> {
+      if (!(data instanceof JSONObject)) {
+        flashMessage(Ui.s(R.string.route_not_found) + (error != null ? "\n" + error : ""));
+        return;
+      }
+      JSONObject r = (JSONObject) data;
+      JSONArray keys = new JSONArray();
+      JSONArray segments = r.optJSONArray("segments");
+      for (int i = 0; segments != null && i < segments.length(); i++) keys.put(segments.optJSONObject(i).optString("key"));
+      requestedDestNode = destNode;
+      setRoute(Route.parse(r));
+      nav.mutate("app.setActiveRoute", keys, null);
+      if (routeStopsArePickup) flashMessage(Ui.s(R.string.map_job_legend)); // what the two pins are
+      else hideMessage();
+    });
+  }
+
+  @Override
+  public void onBackPressed() {
+    if (searchPanel.isShown()) searchPanel.hide();
+    else if (destCard.getVisibility() == View.VISIBLE) hideDestCard();
+    else if ("map".equals(screen) && !following) setFollowing(true);
+    else if (!"home".equals(screen)) showScreen("home");
+    else moveTaskToBack(true); // keep the connections warm instead of finishing
+  }
+
+  @Override
+  protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent);
+    if (applyIntent(intent)) {
+      restartClients();
+    }
+  }
+
+  /**
+   * adb shell am start -n tr.rigbuddy/.MainActivity --es host <PC LAN IP>, for the
+   * first setup only: any app on the device can start this activity, and must
+   * not be able to point an already set-up app at another server.
+   */
+  private boolean applyIntent(Intent intent) {
+    String host = intent != null ? intent.getStringExtra("host") : null;
+    if (host == null || host.isEmpty() || !host().isEmpty()) return false;
+    prefs.edit().putString("host", host.trim()).apply();
+    return true;
+  }
+
+  /** The gaming PC's address; empty until the user enters it (first run). */
+  private String host() {
+    return prefs.getString("host", "");
+  }
+
+  private void restartClients() {
+    nav.stop();
+    agent.stop();
+    startClients();
+  }
+
+  private void startClients() {
+    if (host().isEmpty()) {
+      // first run: look for the PC on the LAN before asking for its address
+      showMessage(Ui.s(R.string.pc_searching_hint));
+      PcFinder.find((found, name) -> {
+        if (found != null) {
+          useHost(found, name);
+        } else {
+          hideMessage();
+          showHostDialog();
+        }
+      });
+      return;
+    }
+    nav.start(host());
+    agent.start(host());
+    scheduleRediscovery();
+    screenHost.removeCallbacks(linkWatch);
+    screenHost.postDelayed(linkWatch, LINK_CHECK_MS);
+  }
+
+  /**
+   * The navigation server sometimes stops sending positions while the game is running (it says
+   * "stale" once and then stays quiet until the app subscribes again). The agent's telemetry shows
+   * the game is there, so: game running but no positions (the server said stale, or the truck is
+   * moving and nothing arrives) -> subscribe again by ourselves, at most every 15 s.
+   */
+  private static final long LINK_CHECK_MS = 4_000;
+  private final Runnable linkWatch = new Runnable() {
+    @Override
+    public void run() {
+      if (isFinishing()) return;
+      long now = SystemClock.uptimeMillis();
+      boolean game = lastTelemetry != null && now - lastTelemetryAt < 4_000;
+      boolean positions = now - lastPositionAt < 8_000;
+      boolean stuck = game && !positions && (staleBinding || lastSpeedKph > 1);
+      if (stuck && now - lastNavRestartAt > 15_000 && !host().isEmpty()) {
+        lastNavRestartAt = now;
+        Log.i(TAG, "game is running but no positions: subscribing to the navigation server again");
+        nav.stop();
+        nav.start(host());
+      }
+      screenHost.postDelayed(this, LINK_CHECK_MS);
+    }
+  };
+
+  private void useHost(String found, String name) {
+    prefs.edit().putString("host", found).apply();
+    hideMessage();
+    flashMessage(Ui.s(R.string.pc_found, name != null ? name + " (" + found + ")" : found));
+    restartClients();
+  }
+
+  /**
+   * The PC's IP can change (DHCP). While the agent stays unreachable, look for
+   * the PC again every 30 s and switch to it if it moved.
+   */
+  private final Runnable rediscover = () -> {
+    if (agent.isConnected() || isFinishing()) return;
+    PcFinder.find((found, name) -> {
+      if (found != null && !found.equals(host())) useHost(found, name);
+      else scheduleRediscovery();
+    });
+  };
+
+  private void scheduleRediscovery() {
+    screenHost.removeCallbacks(rediscover);
+    screenHost.postDelayed(rediscover, 30_000);
+  }
+
+  // --- map setup -------------------------------------------------------------
+
+  private void onMapReady(MapboxMap m) {
+    map = m;
+    map.setMinZoomPreference(4);
+    map.setMaxZoomPreference(17);
+    map.setPrefetchesTiles(false);
+    map.getUiSettings().setAttributionEnabled(false);
+    map.getUiSettings().setLogoEnabled(false);
+    map.getUiSettings().setCompassEnabled(false);
+    map.addOnCameraMoveStartedListener(reason -> {
+      if (reason == MapboxMap.OnCameraMoveStartedListener.REASON_API_GESTURE) setFollowing(false);
+    });
+    // Long-press anywhere = "go here", like clicking a point on the in-game map.
+    map.addOnMapLongClickListener(point -> {
+      onMapLongPress(point.getLongitude(), point.getLatitude());
+      return true;
+    });
+    map.moveCamera(CameraUpdateFactory.newCameraPosition(
+        new CameraPosition.Builder().target(new LatLng(50.6, 10.3)).zoom(5).build()));
+    loadStyle();
+  }
+
+  private void loadStyle() {
+    if (map == null) return;
+    File mbtiles = TileDownloader.fileFor(mapDir(), game);
+    String tileUrl = "http://127.0.0.1:1/none/{z}/{x}/{y}.pbf";
+    if (mbtiles.exists()) {
+      try {
+        LocalTileServer server = tileServers.get(game);
+        if (server == null) {
+          server = new LocalTileServer(mbtiles, game);
+          tileServers.put(game, server);
+          tileUrlCache.put(game, server.start());
+        }
+        tileUrl = tileUrlCache.get(game);
+        hideMessage();
+      } catch (IOException e) {
+        showMessage(Ui.s(R.string.map_file_failed, e.getMessage()));
+      }
+    } else if (!tiles.isRunning()) {
+      showMessage(host().isEmpty()
+          ? Ui.s(R.string.map_will_download)
+          : Ui.s(R.string.map_will_download_pc));
+    }
+    File sprites = TileDownloader.spritesDir(mapDir());
+    String spriteUrl = new File(sprites, "sprites.png").exists() ? "file://" + sprites.getAbsolutePath() + "/sprites" : null;
+    style = null;
+    map.setStyle(new Style.Builder().fromJson(
+        MapStyle.build(game, tileUrl, spriteUrl, darkMode)), this::onStyleLoaded);
+  }
+
+  private final Map<String, String> tileUrlCache = new HashMap<>();
+
+  private void onStyleLoaded(Style s) {
+    Log.i(TAG, "style loaded: " + game + (darkMode ? " dark" : " light"));
+    style = s;
+    s.addImage("truck-arrow", TruckArrowView.bitmap(64));
+    s.addImage("dest-pin", destinationPin());
+    s.addImage("pin-pickup", stopPin(0xff1e8e3e, 0xff0d652d, 1));
+    s.addImage("pin-delivery", stopPin(0xffea4335, 0xffa50e0e, 2));
+    s.addImage("pin-stop", stopPin(0xff1a73e8, 0xff0b57d0, 0));
+
+    routeSource = new GeoJsonSource("route");
+    destSource = new GeoJsonSource("dest");
+    truckSource = new GeoJsonSource("truck");
+    pickSource = new GeoJsonSource("pick");
+    s.addSource(routeSource);
+    s.addSource(destSource);
+    s.addSource(truckSource);
+    s.addSource(pickSource);
+
+    // "zoom" must be the input of a top-level interpolate, so the casing gets its own curve.
+    Expression routeWidth = routeWidth(0);
+    s.addLayerBelow(new LineLayer("route-casing", "route").withProperties(
+        PropertyFactory.lineColor(darkMode ? "#0b3d91" : "#1558c0"),
+        PropertyFactory.lineWidth(routeWidth(4)),
+        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)), MapStyle.LAYER_ROUTE_ANCHOR);
+    s.addLayerBelow(new LineLayer("route-line", "route").withProperties(
+        PropertyFactory.lineColor(darkMode ? "#4c8df6" : "#4285f4"),
+        PropertyFactory.lineWidth(routeWidth),
+        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)), MapStyle.LAYER_ROUTE_ANCHOR);
+    // the route's ends: the destination, and on a route with stops (a job: pickup then delivery; a bus line) each stop with
+    // its own pin and name, so the two ends of a job are not one long line (the feature says which: "pin", "label")
+    s.addLayer(new SymbolLayer("dest", "dest").withProperties(
+        PropertyFactory.iconImage(Expression.get("pin")),
+        PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
+        PropertyFactory.iconAllowOverlap(true),
+        PropertyFactory.iconIgnorePlacement(true),
+        PropertyFactory.textField(Expression.get("label")),
+        PropertyFactory.textFont(new String[] {"Klokantech Noto Sans Bold"}),
+        PropertyFactory.textSize(14f),
+        PropertyFactory.textAnchor(Property.TEXT_ANCHOR_TOP),
+        PropertyFactory.textOffset(new Float[] {0f, 0.3f}),
+        PropertyFactory.textColor(darkMode ? "#ffffff" : "#202124"),
+        PropertyFactory.textHaloColor(darkMode ? "#000000" : "#ffffff"),
+        PropertyFactory.textHaloWidth(1.6f),
+        PropertyFactory.textAllowOverlap(true),
+        PropertyFactory.textIgnorePlacement(true)));
+    s.addLayer(new SymbolLayer("pick", "pick").withProperties(
+        PropertyFactory.iconImage("dest-pin"),
+        PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
+        PropertyFactory.iconOpacity(0.75f),
+        PropertyFactory.iconAllowOverlap(true),
+        PropertyFactory.iconIgnorePlacement(true)));
+    s.addLayer(new SymbolLayer("truck", "truck").withProperties(
+        PropertyFactory.iconImage("truck-arrow"),
+        PropertyFactory.iconRotate(Expression.get("bearing")),
+        PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_MAP),
+        PropertyFactory.iconAllowOverlap(true),
+        PropertyFactory.iconIgnorePlacement(true),
+        PropertyFactory.visibility(following ? Property.NONE : Property.VISIBLE)));
+    routeDrawn = null;
+    renderRoute();
+  }
+
+  private static Expression routeWidth(float extra) {
+    return Expression.interpolate(Expression.exponential(1.5f), Expression.zoom(),
+        Expression.stop(6, 3f + extra), Expression.stop(10, 5f + extra), Expression.stop(12, 7f + extra),
+        Expression.stop(13, 10f + extra), Expression.stop(14, 16f + extra), Expression.stop(16, 50f + extra));
+  }
+
+  /**
+   * The ends of the route: where each segment ends. One segment: the destination (the red pin, no name). Several (a job
+   * routed pickup -> delivery, a bus line's stops): the pickup green with a parcel, the delivery red with a flag, a bus
+   * stop blue, each with its name under it. "seg": the segment it ends, to hide the stops already passed.
+   */
+  private List<Feature> routeEnds(Route r) {
+    List<Feature> out = new ArrayList<>();
+    int segments = r.steps.get(r.steps.size() - 1).segmentIndex + 1;
+    for (int i = 0; i < r.steps.size(); i++) {
+      Route.Step st = r.steps.get(i);
+      boolean lastOfSegment = i == r.steps.size() - 1 || r.steps.get(i + 1).segmentIndex != st.segmentIndex;
+      if (!lastOfSegment) continue;
+      boolean finalStop = st.segmentIndex == segments - 1;
+      Feature f = Feature.fromGeometry(Point.fromLngLat(st.manLon, st.manLat));
+      String pin, label;
+      if (segments == 1) { pin = "dest-pin"; label = ""; }
+      else if (finalStop) { pin = "pin-delivery"; label = Ui.s(routeStopsArePickup ? R.string.map_delivery : R.string.map_last_stop); }
+      else if (routeStopsArePickup) { pin = "pin-pickup"; label = Ui.s(R.string.map_pickup); }
+      else { pin = "pin-stop"; label = Ui.s(R.string.map_stop, st.segmentIndex + 1); }
+      f.addStringProperty("pin", pin);
+      f.addStringProperty("label", label);
+      f.addNumberProperty("seg", st.segmentIndex);
+      out.add(f);
+    }
+    return out;
+  }
+
+  /** A pin like the destination's in `fill` / `dark`, with a white mark in it: 1 a parcel (pickup), 2 a flag (delivery), 0 a dot. */
+  private static Bitmap stopPin(int fill, int dark, int mark) {
+    int w = 56, h = 74;
+    Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+    Canvas c = new Canvas(bmp);
+    Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
+    body.setColor(fill);
+    Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+    edge.setColor(dark);
+    edge.setStyle(Paint.Style.STROKE);
+    edge.setStrokeWidth(2.5f);
+    android.graphics.Path p = new android.graphics.Path();
+    p.moveTo(28, 72);
+    p.cubicTo(16, 53, 4, 42, 4, 26);
+    p.arcTo(new android.graphics.RectF(4, 2, 52, 50), 180, 180, false);
+    p.cubicTo(52, 42, 40, 53, 28, 72);
+    p.close();
+    c.drawPath(p, body);
+    c.drawPath(p, edge);
+    Paint white = new Paint(Paint.ANTI_ALIAS_FLAG);
+    white.setColor(0xffffffff);
+    if (mark == 1) {
+      // a parcel: a box with the tape across its lid
+      c.drawRoundRect(new android.graphics.RectF(16, 16, 40, 38), 3, 3, white);
+      Paint tape = new Paint(Paint.ANTI_ALIAS_FLAG);
+      tape.setColor(fill);
+      c.drawRect(26, 16, 30, 26, tape);
+      c.drawRect(16, 22, 40, 24, tape);
+    } else if (mark == 2) {
+      // a chequered flag on its pole
+      c.drawRect(17, 13, 20, 41, white);
+      Paint sq = new Paint(Paint.ANTI_ALIAS_FLAG);
+      for (int row = 0; row < 3; row++)
+        for (int col = 0; col < 4; col++) {
+          sq.setColor((row + col) % 2 == 0 ? 0xffffffff : 0xff202124);
+          c.drawRect(20 + col * 5, 14 + row * 5, 25 + col * 5, 19 + row * 5, sq);
+        }
+    } else {
+      c.drawCircle(28, 26, 8, white);
+    }
+    return bmp;
+  }
+
+  private Bitmap destinationPin() {
+    int w = 48, h = 64;
+    Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+    Canvas c = new Canvas(bmp);
+    Paint red = new Paint(Paint.ANTI_ALIAS_FLAG);
+    red.setColor(0xffea4335);
+    Paint dark = new Paint(Paint.ANTI_ALIAS_FLAG);
+    dark.setColor(0xffa50e0e);
+    android.graphics.Path p = new android.graphics.Path();
+    p.moveTo(24, 63);
+    p.cubicTo(14, 46, 4, 36, 4, 22);
+    p.arcTo(new android.graphics.RectF(4, 2, 44, 42), 180, 180, false);
+    p.cubicTo(44, 36, 34, 46, 24, 63);
+    p.close();
+    c.drawPath(p, red);
+    c.drawCircle(24, 22, 7, dark);
+    return bmp;
+  }
+
+  // --- navigation events -------------------------------------------------------
+
+  @Override
+  public void onStateChanged(NavClient.State state, String detail) {
+    String text;
+    int color;
+    switch (state) {
+      case CONNECTED:
+        text = Ui.s(tracker.hasData() ? R.string.st_connected : R.string.st_connected_wait);
+        color = 0xff188038;
+        break;
+      case PAIRING:
+        text = Ui.s(R.string.st_pairing) + (detail != null ? " · " + detail : "");
+        color = 0xffe37400;
+        break;
+      case CONNECTING:
+        text = Ui.s(R.string.st_connecting) + " · " + detail;
+        color = 0xff5f6368;
+        break;
+      default:
+        text = Ui.s(R.string.st_disconnected) + " · " + (detail != null ? detail : "");
+        color = 0xffd93025;
+    }
+    statusView.setText(text);
+    statusView.setTextColor(color);
+    if (railNavDot != null) {
+      railNavDot.setBackground(Ui.rounded(state == NavClient.State.CONNECTED ? Ui.GREEN
+          : state == NavClient.State.DISCONNECTED ? Ui.RED : Ui.YELLOW, Ui.dp(this, 5)));
+    }
+    Log.i(TAG, "state " + state + " " + detail);
+  }
+
+  @Override
+  public void onEvent(String type, Object data) {
+    switch (type) {
+      case "positionUpdate":
+        if (data instanceof JSONObject) {
+          lastPositionAt = SystemClock.uptimeMillis();
+          // (not tracker.hasData(): the agent's position stream may have filled the tracker before the server's first one)
+          boolean first = !serverPositionSeen || staleBinding;
+          serverPositionSeen = true;
+          if (first) Log.i(TAG, "first positionUpdate: " + data);
+          tracker.onPositionUpdate((JSONObject) data);
+          // The server only says "stale" once; a position coming in again means the game is back.
+          staleBinding = false;
+          if (first) {
+            onStateChanged(NavClient.State.CONNECTED, null);
+            placeTruckArrow();
+            truckArrow.setVisibility(following ? View.VISIBLE : View.GONE);
+          }
+        }
+        break;
+      case "routeUpdate":
+        setRoute(data instanceof JSONObject ? Route.parse((JSONObject) data) : null);
+        break;
+      case "routeProgress":
+        if (data instanceof JSONObject && route != null) {
+          JSONObject idx = (JSONObject) data;
+          int flat = route.flatIndex(idx.optInt("segmentIndex"), idx.optInt("stepIndex"));
+          if (flat >= 0) serverStepHint = flat;
+        }
+        break;
+      case "jobUpdate":
+        if (data instanceof JSONObject) {
+          String node = ((JSONObject) data).optString("toNodeUid", null);
+          jobDestNode = node;
+          if (node != null && !node.equals(requestedDestNode)) routeTo(node);
+        } else if (lastTelemetry == null || lastTelemetry.optJSONObject("busJob") == null) {
+          onJobGone(); // (the server knows freight jobs only: a bus line being driven is not gone)
+        }
+        break;
+      case "themeModeUpdate":
+        // Night in the game turns the map dark; a dark app keeps it dark
+        // through the game's day too, instead of a white map on a dark screen.
+        boolean dark = Ui.dark || "dark".equals(data);
+        if (dark != darkMode) {
+          darkMode = dark;
+          loadStyle();
+        }
+        break;
+      case "mapUpdate":
+        String g = "usa".equals(data) ? "ats" : "ets2";
+        if (!g.equals(game)) {
+          game = g;
+          SearchPanel.distanceScale = distanceScale();
+          SearchPanel.routeStrategy = routeStrategyPref();
+          setRoute(null);
+          loadStyle();
+          syncTiles();
+        }
+        break;
+      case "segmentComplete":
+        boolean isFinal = true;
+        if (data instanceof JSONObject) {
+          JSONObject info = (JSONObject) data;
+          isFinal = info.optBoolean("isFinal", true);
+          flashMessage(Ui.s(isFinal ? R.string.arrived : R.string.waypoint_reached) + "\n"
+              + info.optString("place") + "\n" + info.optString("placeInfo"));
+        }
+        nav.mutate("app.unpauseRouteEvents", null, null);
+        if (isFinal) arrived();
+        break;
+      case "staleBinding":
+        staleBinding = true;
+        statusView.setText(Ui.s(R.string.st_disconnected));
+        statusView.setTextColor(0xffe37400);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** Picks the server's first suggested route to a node and makes it active. */
+  /** Same route strategies ETS2's own route advisor offers: fastest ("Best"), shortest, smallRoads. */
+  private static final String[] ROUTE_STRATEGIES = {"fastest", "shortest", "smallRoads"};
+
+  private String routeStrategyPref() {
+    return prefs.getString("routeStrategy", ROUTE_STRATEGIES[0]);
+  }
+
+  private void routeTo(String nodeUid) {
+    if (pickingRoute) return;
+    pickingRoute = true;
+    requestedDestNode = nodeUid;
+    JSONObject input = new JSONObject();
+    try {
+      input.put("toNodeUid", nodeUid);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+    nav.query("app.previewRoutes", input, (data, error) -> {
+      pickingRoute = false;
+      JSONArray routes = NavClient.asArray(data);
+      if (error != null || routes.length() == 0) {
+        Log.w(TAG, "no route to " + nodeUid + ": " + error);
+        requestedDestNode = null;
+        flashMessage(Ui.s(R.string.route_not_found) + (error != null ? "\n" + error : ""));
+        return;
+      }
+      JSONObject best = Route.pick(routes, routeStrategyPref());
+      JSONArray keys = new JSONArray();
+      JSONArray segments = best.optJSONArray("segments");
+      for (int i = 0; segments != null && i < segments.length(); i++) {
+        keys.put(segments.optJSONObject(i).optString("key"));
+      }
+      setRoute(Route.parse(best));
+      if (pickSource != null) pickSource.setGeoJson(FeatureCollection.fromFeatures(new Feature[0]));
+      nav.mutate("app.setActiveRoute", keys, null);
+    });
+  }
+
+  /** Snaps a map point to the nearest routable place and offers it as a destination. */
+  private void onMapLongPress(double lon, double lat) {
+    searchPanel.hide();
+    setPickMarker(lon, lat);
+    destTitle.setText(Ui.s(R.string.searching_location));
+    destSubtitle.setText("");
+    destCard.setVisibility(View.VISIBLE);
+    pendingDest = null;
+    JSONArray input = new JSONArray();
+    try {
+      input.put(lon).put(lat);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+    nav.query("app.synthesizeSearchResult", input, (data, error) -> {
+      if (!(data instanceof JSONObject)) {
+        destTitle.setText(Ui.s(R.string.no_route_here));
+        destSubtitle.setText(error != null ? error : Ui.s(R.string.press_closer_to_road));
+        return;
+      }
+      showDestCard(SearchPanel.Result.from((JSONObject) data));
+    });
+  }
+
+  private void showDestCard(SearchPanel.Result r) {
+    pendingDest = r;
+    destTitle.setText(r.title);
+    destSubtitle.setText(r.subtitle);
+    destCard.setVisibility(View.VISIBLE);
+    setPickMarker(r.lon, r.lat);
+    showRouteDistance(r);
+    if (map != null) {
+      setFollowing(false);
+      map.animateCamera(CameraUpdateFactory.newCameraPosition(new CameraPosition.Builder()
+          .target(new LatLng(r.lat, r.lon)).zoom(Math.min(map.getCameraPosition().zoom, 12)).tilt(0)
+          .padding(0, 0, 0, 0).build()), 600);
+    }
+  }
+
+  /** Adds the distance by road to the destination card when the search list did not have it yet. */
+  private void showRouteDistance(SearchPanel.Result r) {
+    if (r.hasRoute || r.nodeUid == null || r.nodeUid.isEmpty() || r.subtitleBase == null) return;
+    JSONObject input = new JSONObject();
+    try {
+      input.put("toNodeUid", r.nodeUid);
+    } catch (Exception e) {
+      return;
+    }
+    nav.query("app.previewRoutes", input, (data, error) -> {
+      JSONArray routes = NavClient.asArray(data);
+      if (error != null || routes.length() == 0 || pendingDest != r) return;
+      r.setRouteMeters(Route.parse(Route.pick(routes, routeStrategyPref())).metersToStop(r.lon, r.lat) * distanceScale());
+      destSubtitle.setText(r.subtitle);
+    });
+  }
+
+  private void hideDestCard() {
+    destCard.setVisibility(View.GONE);
+    pendingDest = null;
+    if (pickSource != null) pickSource.setGeoJson(FeatureCollection.fromFeatures(new Feature[0]));
+  }
+
+  private void setPickMarker(double lon, double lat) {
+    if (pickSource != null) pickSource.setGeoJson(Feature.fromGeometry(Point.fromLngLat(lon, lat)));
+  }
+
+  /** Destination reached: drop the route and the red pin. */
+  private void arrived() {
+    if (route == null) return;
+    Log.i(TAG, "arrived, clearing route");
+    cancelRoute();
+  }
+
+  /**
+   * A bus line being driven (bus DLC; the agent has it from Rig Buddy's telemetry plugin, the navigation server does
+   * not know it): its next stop is the job's destination for the job button, and like a freight job the route goes
+   * there by itself - when the line is taken and again at every stop, once the navigation server is up.
+   */
+  private void onBusJob(JSONObject busJob) {
+    JSONObject next = busJob.optJSONObject("next");
+    String node = next != null && !next.isNull("nodeUid") ? next.optString("nodeUid", null) : null;
+    if (node == null || node.isEmpty()) return;
+    jobDestNode = node;
+    if (node.equals(busRoutedNode) || !serverPositionSeen || pickingRoute) return;
+    busRoutedNode = node;
+    if (!node.equals(requestedDestNode)) routeTo(node);
+  }
+
+  /**
+   * The job taken in the game is gone (cancelled). The route to its destination goes with it; a route the user chose
+   * himself (search, a pin on the map) stays.
+   */
+  private void onJobGone() {
+    String was = jobDestNode;
+    jobDestNode = null;
+    busRoutedNode = null;
+    if (was != null && was.equals(requestedDestNode) && route != null) {
+      cancelRoute();
+      flashMessage(Ui.s(R.string.job_cancelled));
+    }
+    requestedDestNode = null;
+  }
+
+  private void cancelRoute() {
+    // Keep requestedDestNode so an ongoing job doesn't immediately re-route.
+    nav.mutate("app.setActiveRoute", null, null);
+    setRoute(null);
+  }
+
+  private void setRoute(Route r) {
+    route = r;
+    routeStep = -1;
+    serverStepHint = 0;
+    renderRoute();
+    updateGuidance(true);
+  }
+
+  /**
+   * The route is handed to the map once, one line per step; passing a step only moves a filter, so
+   * the map does not re-parse the whole remaining route at every manoeuvre.
+   */
+  private void renderRoute() {
+    if (style == null || routeSource == null) return;
+    if (route == null || route.steps.isEmpty()) {
+      routeSource.setGeoJson(FeatureCollection.fromFeatures(new Feature[0]));
+      destSource.setGeoJson(FeatureCollection.fromFeatures(new Feature[0]));
+      routeDrawn = null;
+      return;
+    }
+    if (routeDrawn != route) {
+      List<Feature> lines = new ArrayList<>();
+      for (int i = 0; i < route.steps.size(); i++) {
+        double[] ll = route.steps.get(i).lonLat;
+        List<Point> pts = new ArrayList<>(ll.length / 2);
+        for (int k = 0; k + 1 < ll.length; k += 2) pts.add(Point.fromLngLat(ll[k], ll[k + 1]));
+        if (pts.size() < 2) continue;
+        Feature f = Feature.fromGeometry(LineString.fromLngLats(pts));
+        f.addNumberProperty("i", i);
+        lines.add(f);
+      }
+      routeSource.setGeoJson(FeatureCollection.fromFeatures(lines));
+      destSource.setGeoJson(FeatureCollection.fromFeatures(routeEnds(route)));
+      routeDrawn = route;
+      routeFilterStep = Integer.MIN_VALUE;
+    }
+    int from = Math.max(0, routeStep);
+    if (from != routeFilterStep) {
+      routeFilterStep = from;
+      Expression keep = Expression.gte(Expression.get("i"), Expression.literal(from));
+      for (String id : new String[] {"route-casing", "route-line"}) {
+        LineLayer layer = style.getLayerAs(id);
+        if (layer != null) layer.setFilter(keep);
+      }
+      // a stop already passed (the pickup once the truck drives on to the delivery) leaves the map
+      SymbolLayer ends = style.getLayerAs("dest");
+      int seg = route.steps.get(Math.min(from, route.steps.size() - 1)).segmentIndex;
+      if (ends != null) ends.setFilter(Expression.gte(Expression.get("seg"), Expression.literal(seg)));
+    }
+  }
+
+  // --- per-frame camera + guidance -----------------------------------------------
+
+  @Override
+  public void doFrame(long frameTimeNanos) {
+    if (!frameLoopRunning) return;
+    // Nothing moves on screen while a menu is up or the truck stands still: look again five times a second
+    // instead of at every display refresh (the guidance and speed texts keep their own, slower, timers).
+    if (idleLoop) Choreographer.getInstance().postFrameCallbackDelayed(this, IDLE_FRAME_DELAY_MS);
+    else Choreographer.getInstance().postFrameCallback(this);
+    long now = SystemClock.uptimeMillis();
+    if (now - lastFrameMs < FRAME_INTERVAL_MS - 4 || map == null || !tracker.hasData()) return;
+    lastFrameMs = now;
+
+    tracker.poseAt(now, pose);
+    if (!pose.valid) return;
+
+    // the home screen shows the live map in a card, following the truck
+    boolean mapShown = "map".equals(screen) || "home".equals(screen);
+    idleLoop = !mapShown || Math.abs(pose.speed) < 0.2;
+    if (mapShown) updateSnap(now);
+    // The correction towards the tarmac is eased in and out (a company yard, a junction, a curve: the nearest road changes
+    // from one query to the next, and a marker that jumps with it looks like stutter).
+    double wantDx = snapValid ? snapDx : 0, wantDy = snapValid ? snapDy : 0;
+    double ease = 1 - Math.exp(-Math.min(200, now - lastEaseMs) / SNAP_EASE_MS);
+    lastEaseMs = now;
+    easeDx += (wantDx - easeDx) * ease;
+    easeDy += (wantDy - easeDy) * ease;
+    double shownLon = pose.lon + easeDx;
+    double shownLat = pose.lat + easeDy;
+    if (following && mapShown) {
+      double targetZoom = zoomForSpeed(pose.speed * 3.6);
+      smoothedZoom += (targetZoom - smoothedZoom) * 0.03;
+      int h = mapView.getHeight();
+      double topPad = h * (2 * FOCUS_FROM_TOP - 1);
+      // Standing still (or in a menu) the camera would be told the same thing 30 times a second.
+      double bearing = pose.bearingDeg();
+      boolean same = Math.abs(shownLon - camLon) < 1e-8 && Math.abs(shownLat - camLat) < 1e-8
+          && Math.abs(bearing - camBearing) < 0.05 && Math.abs(smoothedZoom - camZoom) < 0.0005
+          && h == camHeight;
+      if (!same) {
+        camLon = shownLon; camLat = shownLat; camBearing = bearing; camZoom = smoothedZoom; camHeight = h;
+      }
+      if (!same) map.moveCamera(CameraUpdateFactory.newCameraPosition(new CameraPosition.Builder()
+          .target(new LatLng(shownLat, shownLon))
+          .bearing(pose.bearingDeg())
+          .tilt(FOLLOW_TILT)
+          .zoom(smoothedZoom)
+          .padding(0, topPad, 0, 0)
+          .build()));
+    } else if (mapShown && !following && truckSource != null && now - lastTruckSourceMs > 200) {
+      lastTruckSourceMs = now;
+      Feature f = Feature.fromGeometry(Point.fromLngLat(shownLon, shownLat));
+      f.addNumberProperty("bearing", pose.bearingDeg());
+      truckSource.setGeoJson(f);
+    }
+
+    if (now - lastGuidanceMs > GUIDANCE_INTERVAL_MS) {
+      lastGuidanceMs = now;
+      updateGuidance(false);
+    }
+    if (BuildConfig.DEBUG && now - lastDebugLogMs > 3000) {
+      lastDebugLogMs = now;
+      CameraPosition cam = map.getCameraPosition();
+      Log.i(TAG, String.format(Locale.US, "pose %.5f,%.5f hdg=%.0f spd=%.1f | cam %.5f,%.5f z=%.2f b=%.0f t=%.0f",
+          pose.lon, pose.lat, pose.bearingDeg(), pose.speed * 3.6,
+          cam.target.getLongitude(), cam.target.getLatitude(), cam.zoom, cam.bearing, cam.tilt));
+    }
+    if (now - lastHudMs > 250) {
+      lastHudMs = now;
+      speedView.setText(String.valueOf(Math.round(Math.abs(pose.speed) * 3.6)));
+      if (tracker.speedLimitKph > 0) {
+        speedLimitView.setVisibility(View.VISIBLE);
+        speedLimitView.setText(String.valueOf(Math.round(tracker.speedLimitKph)));
+      } else {
+        speedLimitView.setVisibility(View.GONE);
+      }
+    }
+  }
+
+  /** Map units are ~19x game meters, so these zooms feel like Google's 16-17. */
+  private static double zoomForSpeed(double kph) {
+    double k = Math.max(0, Math.min(1, kph / 100));
+    return 14.0 - k * 1.4;
+  }
+
+  /**
+   * Puts the truck on the tarmac when the game says it is beside it. The map
+   * draws roads as surfaces, so as long as the reported position is inside one
+   * it is left alone; when it is not (a company yard's own roads are not in the
+   * map, and the truck drives in a lane, not on the centre line) the marker
+   * moves to the nearest road within SNAP_MAX_M. TruckSim GPS does the same
+   * (SnapToNearestRoad, ROAD_SNAP_MAX_DISTANCE), which is why its truck never
+   * hangs off the road.
+   */
+  // Only the width of a lane or so: a truck in a company yard is far from any mapped road, and pulling it to the nearest one
+  // (the public road outside) made the marker hop up and down while loading.
+  private static final double SNAP_MAX_M = 130;    // map metres, i.e. ~7 game metres
+  private static final long SNAP_INTERVAL_MS = 250;
+  private static final double SNAP_EASE_MS = 220;
+  private double snapDx, snapDy;                   // correction (degrees) found by the last query
+  private double easeDx, easeDy;                   // the correction as drawn, eased
+  private boolean snapValid;
+  private long lastSnapMs, lastEaseMs;
+
+  private void updateSnap(long now) {
+    if (now - lastSnapMs < SNAP_INTERVAL_MS) return;
+    lastSnapMs = now;
+    if (map == null || map.getCameraPosition().zoom < 10) { snapValid = false; return; }
+    PointF at = map.getProjection().toScreenLocation(new LatLng(pose.lat, pose.lon));
+    RectF box = new RectF(at.x - 80, at.y - 80, at.x + 80, at.y + 80);
+    List<Feature> found;
+    try {
+      found = map.queryRenderedFeatures(box, "road-surfaces", "road-surfaces-hidden");
+    } catch (RuntimeException e) {
+      snapValid = false;
+      return;
+    }
+    final double cos = Math.cos(Math.toRadians(pose.lat)), M = 111320;
+    double best = SNAP_MAX_M, bestLon = 0, bestLat = 0;
+    for (Feature f : found) {
+      if (!(f.geometry() instanceof Polygon)) continue;
+      for (List<Point> ring : ((Polygon) f.geometry()).coordinates()) {
+        if (ring.size() < 4) continue;
+        if (ringContains(ring, pose.lon, pose.lat)) { snapValid = false; return; } // on tarmac already
+        for (int i = 0; i < ring.size() - 1; i++) {
+          Point a = ring.get(i), b = ring.get(i + 1);
+          double ax = (a.longitude() - pose.lon) * cos * M, ay = (a.latitude() - pose.lat) * M;
+          double bx = (b.longitude() - pose.lon) * cos * M, by = (b.latitude() - pose.lat) * M;
+          double dx = bx - ax, dy = by - ay;
+          double len = dx * dx + dy * dy;
+          double t = len == 0 ? 0 : Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len));
+          double px = ax + dx * t, py = ay + dy * t;
+          double d = Math.hypot(px, py);
+          if (d < best) {
+            best = d;
+            bestLon = pose.lon + px / (cos * M);
+            bestLat = pose.lat + py / M;
+          }
+        }
+      }
+    }
+    snapValid = best < SNAP_MAX_M;
+    if (snapValid) {
+      snapDx = bestLon - pose.lon;
+      snapDy = bestLat - pose.lat;
+    }
+  }
+
+  /** Ray casting: is the point inside this ring? */
+  private static boolean ringContains(List<Point> ring, double lon, double lat) {
+    boolean in = false;
+    for (int i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+      double xi = ring.get(i).longitude(), yi = ring.get(i).latitude();
+      double xj = ring.get(j).longitude(), yj = ring.get(j).latitude();
+      if (((yi > lat) != (yj > lat)) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) in = !in;
+    }
+    return in;
+  }
+
+  private void updateGuidance(boolean force) {
+    if (route == null || route.steps.isEmpty() || !pose.valid) {
+      maneuverPanel.setVisibility(View.GONE);
+      tripPanel.setVisibility(View.GONE);
+      if (home != null) home.setNav(null, null, null, 0);
+      return;
+    }
+    int from = Math.max(Math.max(0, routeStep), serverStepHint);
+    route.locate(pose.lon, pose.lat, Math.min(from, route.steps.size() - 1), progress);
+    if (progress.stepIndex != routeStep || force) {
+      routeStep = progress.stepIndex;
+      renderRoute();
+    }
+
+    int nextIdx = routeStep + 1;
+    // Fallback in case the server's segmentComplete never arrives.
+    boolean nextIsArrival = nextIdx >= route.steps.size() - 1
+        && route.steps.get(route.steps.size() - 1).direction == Route.ARRIVE;
+    if (nextIsArrival && progress.metersToManeuver < 40) {
+      flashMessage(Ui.s(R.string.arrived));
+      arrived();
+      return;
+    }
+    maneuverPanel.setVisibility(View.VISIBLE);
+    if (nextIdx < route.steps.size()) {
+      Route.Step next = route.steps.get(nextIdx);
+      maneuverIcon.setDirection(next.direction);
+      setTextIfChanged(maneuverDistance, formatDistance(progress.metersToManeuver));
+      setTextIfChanged(maneuverText, describe(next));
+      if (nextIdx + 1 < route.steps.size() && progress.metersToManeuver < 1500) {
+        Route.Step after = route.steps.get(nextIdx + 1);
+        if (after.direction != Route.THROUGH && route.steps.get(nextIdx).distanceMeters < 400) {
+          thenIcon.setDirection(after.direction);
+          thenPanel.setVisibility(View.VISIBLE);
+        } else {
+          thenPanel.setVisibility(View.GONE);
+        }
+      } else {
+        thenPanel.setVisibility(View.GONE);
+      }
+    } else {
+      maneuverIcon.setDirection(Route.ARRIVE);
+      setTextIfChanged(maneuverDistance, formatDistance(progress.metersToManeuver));
+      setTextIfChanged(maneuverText, Ui.s(R.string.m_arrive));
+      thenPanel.setVisibility(View.GONE);
+    }
+
+    tripPanel.setVisibility(View.VISIBLE);
+    // Time and arrival only change by the minute; the distance rounds to 50 m or more.
+    long nowMs = SystemClock.uptimeMillis();
+    String key = tripKey;
+    long mins = 0;
+    String remaining = "";
+    long etaMinute = 0;
+    if (force || nowMs - lastTripMs >= 1000) { // once a second is plenty for minutes and 50 m steps
+      lastTripMs = nowMs;
+      mins = Math.max(1, Math.round(progress.secondsRemaining / 60));
+      remaining = formatDistance(progress.metersRemaining * distanceScale());
+      etaMinute = (System.currentTimeMillis() + (long) (progress.secondsRemaining * 1000)) / 60_000;
+      key = mins + "|" + remaining + "|" + etaMinute;
+    }
+    if (!key.equals(tripKey)) {
+      tripKey = key;
+      if (etaFormat == null) etaFormat = new SimpleDateFormat("HH:mm", Ui.LOCALE);
+      String eta = etaFormat.format(new Date(etaMinute * 60_000));
+      tripTime.setText(Ui.duration(mins));
+      // Trip totals are shown like the game's route advisor (world meters x map
+      // scale); maneuver distances stay in world meters, i.e. what you drive.
+      tripDetail.setText(remaining + "  ·  " + eta);
+    }
+    String navKey = maneuverDistance.getText() + "|" + maneuverText.getText() + "|" + key + "|"
+        + (nextIdx < route.steps.size() ? route.steps.get(nextIdx).direction : Route.ARRIVE);
+    if (!navKey.equals(homeNavKey)) {
+      homeNavKey = navKey;
+      home.setNav(maneuverDistance.getText().toString(), maneuverText.getText().toString(),
+          tripTime.getText() + "  ·  " + tripDetail.getText(),
+          nextIdx < route.steps.size() ? route.steps.get(nextIdx).direction : Route.ARRIVE);
+    }
+  }
+
+  private static void setTextIfChanged(TextView v, String text) {
+    if (!text.contentEquals(v.getText())) v.setText(text);
+  }
+
+  private double camLon, camLat, camBearing, camZoom;
+  private int camHeight;
+  private SimpleDateFormat etaFormat;
+  private String tripKey = "", homeNavKey = "";
+
+  /** Map scale of the current game (ETS2 1:19, ATS 1:20). */
+  private double distanceScale() {
+    return "ats".equals(game) ? 20 : 19;
+  }
+
+  private static String describe(Route.Step s) {
+    if (s.bannerText != null && !s.bannerText.isEmpty()) return s.bannerText;
+    switch (s.direction) {
+      case Route.SLIGHT_LEFT: return Ui.s(R.string.m_slight_left);
+      case Route.LEFT: return Ui.s(R.string.m_left);
+      case Route.SHARP_LEFT: return Ui.s(R.string.m_sharp_left);
+      case Route.U_TURN_LEFT: case Route.U_TURN_RIGHT: return Ui.s(R.string.m_u_turn);
+      case Route.SLIGHT_RIGHT: return Ui.s(R.string.m_slight_right);
+      case Route.RIGHT: return Ui.s(R.string.m_right);
+      case Route.SHARP_RIGHT: return Ui.s(R.string.m_sharp_right);
+      case Route.MERGE: return Ui.s(R.string.m_merge);
+      case Route.ARRIVE: return Ui.s(R.string.m_arrive);
+      case Route.FERRY: return Ui.s(R.string.m_ferry);
+      case Route.ROUND_EXIT: return Ui.s(R.string.m_round_exit);
+      default:
+        if (s.direction >= Route.ROUND_BR && s.direction <= Route.ROUND_B) {
+          return s.roundaboutExit > 0 ? Ui.s(R.string.m_roundabout_n, s.roundaboutExit) : Ui.s(R.string.m_roundabout);
+        }
+        return Ui.s(R.string.m_straight);
+    }
+  }
+
+  /** Same rounding rules as the web navigator (components/text.ts). */
+  private static String formatDistance(double meters) {
+    long m = Math.round(meters);
+    if (m <= 100) return Math.max(10, Math.round(m / 10.0) * 10) + " m";
+    if (m <= 1000) return (Math.round(m / 50.0) * 50) + " m";
+    if (m < 10_000) return String.format(Locale.getDefault(), "%.1f km", m / 1000.0);
+    return Math.round(m / 1000.0) + " km";
+  }
+
+  // --- UI helpers -----------------------------------------------------------------
+
+  private void setFollowing(boolean follow) {
+    camHeight = -1; // the camera may have been moved by hand: send the next frame for sure
+    following = follow;
+    recenter.setVisibility(follow ? View.GONE : View.VISIBLE);
+    truckArrow.setVisibility(follow && tracker.hasData() ? View.VISIBLE : View.GONE);
+    if (style != null && style.getLayer("truck") != null) {
+      style.getLayer("truck").setProperties(PropertyFactory.visibility(follow ? Property.NONE : Property.VISIBLE));
+    }
+  }
+
+  private void placeTruckArrow() {
+    View root = findViewById(R.id.root);
+    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) truckArrow.getLayoutParams();
+    int size = lp.width;
+    int left = (root.getWidth() - size) / 2;
+    int top = (int) (root.getHeight() * FOCUS_FROM_TOP) - size / 2;
+    // Called from a layout listener: only touch the params when they change,
+    // otherwise every layout pass schedules another one.
+    if (lp.leftMargin == left && lp.topMargin == top) return;
+    lp.leftMargin = left;
+    lp.topMargin = top;
+    truckArrow.setLayoutParams(lp);
+  }
+
+  private void showSettings() {
+    String latest = prefs.getString("updateLatest", null);
+    boolean update = latest != null && newerThan(latest, BuildConfig.VERSION_NAME);
+    String[] base = {
+        Ui.s(R.string.set_pc_address, host()),
+        Ui.s(R.string.set_repair),
+        Ui.s(R.string.set_theme, themeLabel(Ui.themeSetting(prefs))),
+        Ui.s(R.string.set_language, langLabel(Lang.setting(prefs))),
+        Ui.s(R.string.set_route_strategy, routeStrategyLabel(prefs.getString("routeStrategy", ROUTE_STRATEGIES[0]))),
+    };
+    String[] items = base;
+    if (update) {
+      items = java.util.Arrays.copyOf(base, base.length + 1);
+      items[base.length] = Ui.s(R.string.set_update, latest);
+    }
+    new AlertDialog.Builder(this)
+        .setTitle(Ui.s(R.string.set_title))
+        .setItems(items, (d, which) -> {
+          if (which == 0) showHostDialog();
+          else if (which == 1) {
+            prefs.edit().remove("viewerId").apply();
+            restartClients();
+          } else if (which == 2) showThemeDialog();
+          else if (which == 3) showLanguageDialog();
+          else if (which == 4) showRouteStrategyDialog();
+          else {
+            // the "new version" window when the PC can hand out the APK, else the release page
+            String sha = prefs.getString("updateApkSha", "");
+            if (!sha.isEmpty()) updater.show(latest, sha, prefs.getLong("updateApkSize", 0));
+            else openUpdatePage();
+          }
+        })
+        .setNegativeButton(Ui.s(R.string.btn_close), null)
+        .show();
+  }
+
+  // --- is there a newer Rig Buddy on GitHub? The PC agent asks GitHub (the tablet in the truck may be offline) ---
+
+  private long lastUpdateCheckMs;
+
+  private void checkUpdate() {
+    long now = SystemClock.uptimeMillis();
+    if (lastUpdateCheckMs != 0 && now - lastUpdateCheckMs < 3 * 3600 * 1000L) return;
+    lastUpdateCheckMs = now;
+    agent.get("/update", (json, error) -> {
+      if (json == null) return;
+      String latest = json.optString("latest", "");
+      if (latest.isEmpty() || !newerThan(latest, BuildConfig.VERSION_NAME)) {
+        prefs.edit().remove("updateLatest").remove("updateUrl").remove("updateApkSha").remove("updateApkSize").apply();
+        return;
+      }
+      JSONObject apk = json.optJSONObject("apk");
+      String sha = apk != null ? apk.optString("sha256", "") : "";
+      long size = apk != null ? apk.optLong("size", 0) : 0;
+      prefs.edit().putString("updateLatest", latest).putString("updateUrl", json.optString("url", ""))
+          .putString("updateApkSha", sha).putLong("updateApkSize", size).apply();
+      updater.offer(latest, sha, size); // right after the start: the "download and install / skip / later" window
+      if (!latest.equals(prefs.getString("updateNotified", ""))) { // once per version
+        prefs.edit().putString("updateNotified", latest).apply();
+        flashMessage(Ui.s(R.string.update_app_available, latest));
+      }
+    });
+  }
+
+  /** "0.6.3" is newer than "0.6.2": the numeric parts compared, a missing part is 0. */
+  private static boolean newerThan(String a, String b) {
+    String[] x = a.replaceFirst("^v", "").split("\\."), y = b.replaceFirst("^v", "").split("\\.");
+    for (int i = 0; i < Math.max(x.length, y.length); i++) {
+      int p, q;
+      try {
+        p = i < x.length ? Integer.parseInt(x[i].replaceAll("\\D.*", "")) : 0;
+        q = i < y.length ? Integer.parseInt(y[i].replaceAll("\\D.*", "")) : 0;
+      } catch (NumberFormatException e) {
+        return false;
+      }
+      if (p != q) return p > q;
+    }
+    return false;
+  }
+
+  private void openUpdatePage() {
+    String url = prefs.getString("updateUrl", "");
+    if (!url.startsWith("https://github.com/okokbudak/rig-buddy-studio/")) url = "https://github.com/okokbudak/rig-buddy-studio/releases/latest";
+    try {
+      startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)));
+    } catch (RuntimeException e) {
+      flashMessage(url); // no browser on the device: at least show the address
+    }
+  }
+
+  private static final String[] THEMES = {"system", "light", "dark"};
+
+  private static String themeLabel(String theme) {
+    return Ui.s("light".equals(theme) ? R.string.theme_light : "dark".equals(theme) ? R.string.theme_dark : R.string.theme_system);
+  }
+
+  private void showThemeDialog() {
+    String current = Ui.themeSetting(prefs);
+    String[] labels = new String[THEMES.length];
+    int checked = 0;
+    for (int i = 0; i < THEMES.length; i++) {
+      labels[i] = "system".equals(THEMES[i]) ? Ui.s(R.string.theme_system_long) : themeLabel(THEMES[i]);
+      if (THEMES[i].equals(current)) checked = i;
+    }
+    new AlertDialog.Builder(this)
+        .setTitle(Ui.s(R.string.theme_title))
+        .setSingleChoiceItems(labels, checked, (d, which) -> {
+          d.dismiss();
+          prefs.edit().putString("theme", THEMES[which]).apply();
+          if (Ui.resolveDark(this, THEMES[which]) != Ui.dark) recreate();
+        })
+        .setNegativeButton(Ui.s(R.string.btn_cancel), null)
+        .show();
+  }
+
+  private String langLabel(String code) {
+    for (int i = 1; i < Lang.CODES.length; i++) if (Lang.CODES[i].equals(code)) return Lang.NAMES[i];
+    return Ui.s(R.string.lang_system);
+  }
+
+  private String routeStrategyLabel(String s) {
+    switch (s) {
+      case "shortest": return Ui.s(R.string.route_shortest);
+      case "smallRoads": return Ui.s(R.string.route_small_roads);
+      default: return Ui.s(R.string.route_fastest);
+    }
+  }
+
+  /** Matches ETS2's own "Route: Best / Shortest / Secondary roads" game setting, so both draw the same route. */
+  private void showRouteStrategyDialog() {
+    String current = prefs.getString("routeStrategy", ROUTE_STRATEGIES[0]);
+    String[] labels = new String[ROUTE_STRATEGIES.length];
+    int checked = 0;
+    for (int i = 0; i < ROUTE_STRATEGIES.length; i++) {
+      labels[i] = routeStrategyLabel(ROUTE_STRATEGIES[i]);
+      if (ROUTE_STRATEGIES[i].equals(current)) checked = i;
+    }
+    new AlertDialog.Builder(this)
+        .setTitle(Ui.s(R.string.set_route_strategy_title))
+        .setSingleChoiceItems(labels, checked, (d, which) -> {
+          d.dismiss();
+          prefs.edit().putString("routeStrategy", ROUTE_STRATEGIES[which]).apply();
+          SearchPanel.routeStrategy = ROUTE_STRATEGIES[which];
+        })
+        .setNegativeButton(Ui.s(R.string.btn_cancel), null)
+        .show();
+  }
+
+  private void showLanguageDialog() {
+    String current = Lang.setting(prefs);
+    String[] labels = new String[Lang.CODES.length];
+    int checked = 0;
+    for (int i = 0; i < Lang.CODES.length; i++) {
+      labels[i] = i == 0 ? Ui.s(R.string.lang_system) : Lang.NAMES[i];
+      if (Lang.CODES[i].equals(current)) checked = i;
+    }
+    new AlertDialog.Builder(this)
+        .setTitle(Ui.s(R.string.lang_title))
+        .setSingleChoiceItems(labels, checked, (d, which) -> {
+          d.dismiss();
+          if (Lang.CODES[which].equals(current)) return;
+          prefs.edit().putString("lang", Lang.CODES[which]).apply();
+          recreate(); // attachBaseContext applies the new locale
+        })
+        .setNegativeButton(Ui.s(R.string.btn_cancel), null)
+        .show();
+  }
+
+  /** The device switched light/dark (uiMode is in configChanges, so no automatic restart). */
+  @Override
+  public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+    super.onConfigurationChanged(newConfig);
+    if (Ui.resolveDark(this, Ui.themeSetting(prefs)) != Ui.dark) recreate();
+  }
+
+  private void showHostDialog() {
+    EditText input = new EditText(this);
+    input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+    input.setText(host());
+    input.setHint(Ui.s(R.string.host_hint));
+    input.setSelectAllOnFocus(true);
+    new AlertDialog.Builder(this)
+        .setTitle(Ui.s(R.string.host_title))
+        .setMessage(Ui.s(R.string.host_message))
+        .setView(input)
+        .setPositiveButton(Ui.s(R.string.btn_save), (d, w) -> {
+          prefs.edit().putString("host", input.getText().toString().trim()).apply();
+          restartClients();
+        })
+        .setNeutralButton(Ui.s(R.string.btn_find_pc), (d, w) -> {
+          showMessage(Ui.s(R.string.pc_searching));
+          PcFinder.find((found, name) -> {
+            if (found != null) {
+              useHost(found, name);
+            } else {
+              hideMessage();
+              flashMessage(Ui.s(R.string.pc_not_found));
+              showHostDialog();
+            }
+          });
+        })
+        .setNegativeButton(Ui.s(R.string.btn_cancel), null)
+        .show();
+  }
+
+  private AlertDialog pairDialog;
+
+  /**
+   * The PC shows a 6-digit code (tray menu / Rig Buddy window); entered once, it gets this device a token that the
+   * agent wants with every request. `problem` is why the last try failed, or null.
+   */
+  private void showPairDialog(String problem) {
+    if (pairDialog != null && pairDialog.isShowing()) return;
+    if (isFinishing()) return;
+    EditText input = new EditText(this);
+    input.setInputType(InputType.TYPE_CLASS_NUMBER);
+    input.setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(6)});
+    input.setHint(Ui.s(R.string.pair_hint));
+    input.setGravity(android.view.Gravity.CENTER);
+    input.setTextSize(24);
+    pairDialog = new AlertDialog.Builder(this)
+        .setTitle(Ui.s(R.string.pair_title))
+        .setMessage(problem != null ? problem + "\n\n" + Ui.s(R.string.pair_message) : Ui.s(R.string.pair_message))
+        .setView(input)
+        .setCancelable(false)
+        .setPositiveButton(Ui.s(R.string.btn_pair), null) // set below: a wrong code keeps the dialog open
+        .setNegativeButton(Ui.s(R.string.btn_cancel), null)
+        .create();
+    pairDialog.setOnShowListener(d -> pairDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+      String code = input.getText().toString().trim();
+      if (code.length() != 6) return;
+      v.setEnabled(false);
+      String name = android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL;
+      agent.pair(code, name, (token, error) -> {
+        if (token == null) {
+          v.setEnabled(true);
+          input.setText("");
+          pairDialog.setMessage(error + "\n\n" + Ui.s(R.string.pair_message));
+          return;
+        }
+        prefs.edit().putString("agentToken", token).apply();
+        tr.rigbuddy.agent.AgentAuth.setToken(token);
+        pairDialog.dismiss();
+        flashMessage(Ui.s(R.string.pair_done));
+        restartClients();
+      });
+    }));
+    pairDialog.show();
+  }
+
+  private void showMessage(String text) {
+    messageView.setText(text);
+    messageView.setVisibility(View.VISIBLE);
+  }
+
+  private void hideMessage() {
+    messageView.setVisibility(View.GONE);
+  }
+
+  private final Runnable hideMessageRunnable = this::hideMessage;
+
+  private void flashMessage(String text) {
+    showMessage(text);
+    messageView.removeCallbacks(hideMessageRunnable);
+    messageView.postDelayed(hideMessageRunnable, 6000);
+  }
+
+  private void hideSystemUi() {
+    getWindow().getDecorView().setSystemUiVisibility(
+        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+  }
+
+  // --- lifecycle ------------------------------------------------------------------
+
+  @Override
+  protected void onStart() {
+    super.onStart();
+    mapView.onStart();
+    startClients();
+  }
+
+  @Override
+  protected void onResume() {
+    super.onResume();
+    mapView.onResume();
+    hideSystemUi();
+    updater.onResume(); // back from "allow installing apps": go on with a downloaded update
+    frameLoopRunning = true;
+    Choreographer.getInstance().postFrameCallback(this);
+  }
+
+  @Override
+  protected void onPause() {
+    frameLoopRunning = false;
+    mapView.onPause();
+    super.onPause();
+  }
+
+  @Override
+  protected void onStop() {
+    screenHost.removeCallbacks(rediscover);
+    screenHost.removeCallbacks(linkWatch);
+    nav.stop();
+    agent.stop();
+    mapView.onStop();
+    super.onStop();
+  }
+
+  @Override
+  public void onLowMemory() {
+    super.onLowMemory();
+    mapView.onLowMemory();
+  }
+
+  @Override
+  protected void onSaveInstanceState(Bundle outState) {
+    super.onSaveInstanceState(outState);
+    mapView.onSaveInstanceState(outState);
+  }
+
+  @Override
+  protected void onDestroy() {
+    mapView.onDestroy();
+    for (LocalTileServer s : tileServers.values()) s.stop();
+    super.onDestroy();
+  }
+}
