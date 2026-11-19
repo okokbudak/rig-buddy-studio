@@ -1456,6 +1456,9 @@ public final class MainActivity extends Activity implements NavClient.Listener, 
   // Only the width of a lane or so: a truck in a company yard is far from any mapped road, and pulling it to the nearest one
   // (the public road outside) made the marker hop up and down while loading.
   private static final double SNAP_MAX_M = 130;    // map metres, i.e. ~7 game metres
+  // the fallback arrival needs the truck this close to the route line: map metres, ~20 game metres (as the server's
+  // route follower allows)
+  private static final double ARRIVE_MAX_OFF_ROUTE_M = 400;
   private static final long SNAP_INTERVAL_MS = 250;
   private static final double SNAP_EASE_MS = 220;
   private double snapDx, snapDy;                   // correction (degrees) found by the last query
@@ -1533,10 +1536,12 @@ public final class MainActivity extends Activity implements NavClient.Listener, 
     }
 
     int nextIdx = routeStep + 1;
-    // Fallback in case the server's segmentComplete never arrives.
+    // Fallback in case the server's segmentComplete never arrives. Only on the route: locate() measures along the
+    // route from the nearest point of the line however far the truck is, so a yard beside the end used to count.
     boolean nextIsArrival = nextIdx >= route.steps.size() - 1
         && route.steps.get(route.steps.size() - 1).direction == Route.ARRIVE;
-    if (nextIsArrival && progress.metersToManeuver < 40) {
+    boolean onRoute = progress.offRouteLonLatDist * 111320 < ARRIVE_MAX_OFF_ROUTE_M;
+    if (nextIsArrival && onRoute && progress.metersToManeuver < 40) {
       flashMessage(Ui.s(R.string.arrived));
       arrived();
       return;
